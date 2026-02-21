@@ -1,4 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import {
@@ -140,7 +142,6 @@ const App = () => {
   const [generatedData, setGeneratedData] = useState([]);
   const [isGenerated, setIsGenerated] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [libsReady, setLibsReady] = useState(false);
   const [isStoreLoaded, setIsStoreLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -255,10 +256,6 @@ const App = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const savedConfig = await store.get('appConfig');
-        if (savedConfig) setConfig(prev => ({ ...prev, ...savedConfig }));
-        const mat = await store.get('classMatrix');
-        if (mat) setClassMatrix(mat);
         const ts = await store.get('lastSavedAt');
         if (ts) setLastSavedAt(new Date(ts));
         const favs = await store.get('favorites');
@@ -285,8 +282,6 @@ const App = () => {
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         const now = new Date().toISOString();
-        await store.set('appConfig', config);
-        await store.set('classMatrix', classMatrix);
         await store.set('lastSavedAt', now);
         await store.set('favorites', favorites);
         await store.set('exportHistory', exportHistory);
@@ -301,20 +296,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [config, classMatrix, favorites, exportHistory, darkMode, isStoreLoaded]); // eslint-disable-line
-
-  // ─── PDF Libs ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const ls = src => new Promise((res, rej) => {
-      if (document.querySelector(`script[src="${src}"]`)) return res();
-      const s = document.createElement('script');
-      s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s);
-    });
-    Promise.all([
-      ls('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'),
-      ls('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js'),
-    ]).then(() => setLibsReady(true)).catch(() => addToast('PDF-Bibliothek konnte nicht geladen werden.', 'error'));
-  }, []); // eslint-disable-line
+  }, [favorites, exportHistory, darkMode, isStoreLoaded]); // eslint-disable-line
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -520,10 +502,8 @@ const App = () => {
 
   // ─── PDF ──────────────────────────────────────────────────────────────────
   const downloadPDF = useCallback(async () => {
-    if (!window.jspdf || !libsReady) return addToast('PDF-Bibliothek noch nicht bereit.', 'error');
     setIsExportingPDF(true);
     try {
-      const { jsPDF } = window.jspdf;
       const doc = new jsPDF('l', 'mm', 'a4');
       const primary = [157, 32, 43];
       const fname = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.pdf`;
@@ -543,14 +523,14 @@ const App = () => {
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
-        doc.autoTable({ head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), ...tOpts(activeMatrixCourses), didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } });
+        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), ...tOpts(activeMatrixCourses), didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } });
       }
       [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id, idx) => {
         if (trainers.length || idx > 0) doc.addPage();
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
         renderHeader(`Teilnehmerliste: ${row ? getClassLabel(row) : `Klasse-${id}`}`, `SCHÜLER: ${students.length}`);
-        doc.autoTable({ head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), ...tOpts(students[0].courses) });
+        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), ...tOpts(students[0].courses) });
       });
       const pc = doc.internal.getNumberOfPages();
       for (let i = 1; i <= pc; i++) { doc.setPage(i).setFontSize(7).setTextColor(150).text(fname, 15, 200); doc.text(`Seite ${i} von ${pc}`, 280, 200, { align: 'right' }); }
@@ -558,7 +538,7 @@ const App = () => {
       addExportEntry('PDF', fname); addToast('PDF exportiert.', 'success');
     } catch (e) { console.error(e); addToast('PDF-Export fehlgeschlagen.', 'error'); }
     finally { setIsExportingPDF(false); }
-  }, [generatedData, libsReady, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted, addToast, addExportEntry]);
+  }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted, addToast, addExportEntry]);
 
   // ─── Shortcuts ────────────────────────────────────────────────────────────
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
