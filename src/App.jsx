@@ -97,6 +97,35 @@ const Toast = ({ toasts, removeToast }) => (
   </div>
 );
 
+// ─── Klassenname-Eingabe (eigene Komponente verhindert Focus-Verlust) ──────────
+const ClassNameRow = ({ row, savedValue, onUpdate, C }) => {
+  const [val, setVal] = React.useState(savedValue || '');
+  const ownUpdate = React.useRef(false);
+
+  // Nur von aussen (z.B. Reset) den Wert überschreiben, nicht bei eigenem Tippen
+  React.useEffect(() => {
+    if (!ownUpdate.current) setVal(savedValue || '');
+    ownUpdate.current = false;
+  }, [savedValue]);
+
+  const handleChange = (e) => {
+    ownUpdate.current = true;
+    const v = e.target.value;
+    setVal(v);
+    onUpdate(row.id - 1, v);
+  };
+
+  return (
+    <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center gap-3 px-3 py-2 rounded-xl border focus-within:border-blue-300 transition-colors">
+      <span style={{ color: C.muted }} className="text-[10px] font-mono w-12 shrink-0">K-{String(row.id).padStart(2, '0')}</span>
+      <input type="text" value={val} onChange={handleChange}
+        placeholder={`Klasse-${String(row.id).padStart(2, '0')}`}
+        style={{ color: C.text, backgroundColor: 'transparent' }}
+        className="flex-1 text-xs font-medium outline-none placeholder:opacity-25" />
+    </div>
+  );
+};
+
 // ─── App ───────────────────────────────────────────────────────────────────────
 const App = () => {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -123,6 +152,9 @@ const App = () => {
   const [pendingUpdate, setPendingUpdate] = useState(null);
   const [isInstalling, setIsInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [appVersion, setAppVersion] = useState('...');
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   const saveTimeoutRef = useRef(null);
   const toastIdRef = useRef(0);
@@ -155,6 +187,11 @@ const App = () => {
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
   }, [addToast]);
 
+  // ─── App-Version ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    import('@tauri-apps/api/app').then(m => m.getVersion()).then(setAppVersion).catch(() => setAppVersion('0.1.6'));
+  }, []); // eslint-disable-line
+
   // ─── Updater ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const t = setTimeout(async () => {
@@ -165,6 +202,21 @@ const App = () => {
     }, 3000);
     return () => clearTimeout(t);
   }, []); // eslint-disable-line
+
+  const handleManualUpdateCheck = useCallback(async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const update = await checkUpdate();
+      if (update) {
+        setPendingUpdate(update);
+        setActiveModal(null);
+        addToast(`Update v${update.version} verfügbar — Banner oben!`, 'success');
+      } else {
+        addToast('App ist bereits aktuell.', 'success', 3000);
+      }
+    } catch { addToast('Update-Prüfung fehlgeschlagen.', 'error'); }
+    finally { setIsCheckingUpdate(false); }
+  }, [addToast]);
 
   const handleInstallUpdate = useCallback(async () => {
     if (!pendingUpdate) return;
@@ -366,9 +418,9 @@ const App = () => {
   }, [addToast]);
 
   const handleFullReset = useCallback(async () => {
-    if (!window.confirm('ALLE Daten löschen? (Einstellungen, Matrix, Favoriten, History)')) return;
     setConfig(DEFAULT_CONFIG); setClassMatrix({}); setGeneratedData([]); setIsGenerated(false); setInvalidClassIds(new Set());
     setFavorites([]); setExportHistory([]);
+    setShowDeleteConfirm(false);
     try { await store.clear(); await store.save(); addToast('Alle Daten gelöscht.', 'success'); }
     catch { addToast('Reset fehlgeschlagen.', 'error'); }
   }, [addToast]);
@@ -639,22 +691,34 @@ const App = () => {
             ? <p style={{ color: C.muted }} className="text-[11px] italic">Erst Klassen im Konfigurations-Panel anlegen.</p>
             : <div className="space-y-1.5">
                 {classRows.map(row => (
-                  <div key={row.id} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center gap-3 px-3 py-2 rounded-xl border focus-within:border-blue-300 transition-colors">
-                    <span style={{ color: C.muted }} className="text-[10px] font-mono w-12 shrink-0">K-{String(row.id).padStart(2, '0')}</span>
-                    <input type="text" value={config.classNames?.[row.id - 1] || ''} onChange={e => updateClassName(row.id - 1, e.target.value)}
-                      placeholder={`Klasse-${String(row.id).padStart(2, '0')}`}
-                      style={{ color: C.text, backgroundColor: 'transparent' }} className="flex-1 text-xs font-medium outline-none placeholder:opacity-25" />
-                  </div>
+                  <ClassNameRow key={row.id} row={row} savedValue={config.classNames?.[row.id - 1] || ''} onUpdate={updateClassName} C={C} />
                 ))}
               </div>
           }
         </div>
-        {/* Speicher-Info entfernt */}
+        {/* Update */}
+        <div>
+          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><RefreshCw size={14} /> Software-Update</h4>
+          <button onClick={handleManualUpdateCheck} disabled={isCheckingUpdate || !!pendingUpdate}
+            style={{ borderColor: C.border, color: pendingUpdate ? C.accent2 : C.text, backgroundColor: C.card }}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-xl text-[11px] font-bold hover:opacity-80 disabled:opacity-50 transition-all">
+            {isCheckingUpdate ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            {isCheckingUpdate ? 'Suche nach Updates…' : pendingUpdate ? `Update v${pendingUpdate.version} verfügbar` : 'Jetzt auf Updates prüfen'}
+          </button>
+        </div>
       </div>
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
         <div className="flex items-center gap-3">
-          <button onClick={handleSettingsReset} className="text-amber-600 hover:text-amber-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-amber-50 px-3 py-2 rounded-lg transition-all" title="Klassengrößen auf 15/20/30/40 und Namen auf Standard zurücksetzen"><RefreshCw size={12} /> Zurücksetzen</button>
-          <button onClick={handleFullReset} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all" title="Alle Daten löschen"><Trash2 size={12} /> Alle Daten löschen</button>
+          <button onClick={handleSettingsReset} className="text-amber-600 hover:text-amber-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-amber-50 px-3 py-2 rounded-lg transition-all"><RefreshCw size={12} /> Zurücksetzen</button>
+          {showDeleteConfirm ? (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-rose-600 font-bold">Wirklich alles löschen?</span>
+              <button onClick={handleFullReset} className="bg-rose-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-rose-600 transition-all">Ja</button>
+              <button onClick={() => setShowDeleteConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="border text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-black/5 transition-all">Nein</button>
+            </div>
+          ) : (
+            <button onClick={() => setShowDeleteConfirm(true)} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all"><Trash2 size={12} /> Alle Daten löschen</button>
+          )}
         </div>
         <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-xs">Schließen</button>
       </div>
@@ -678,9 +742,13 @@ const App = () => {
             </div>
             <div className="flex-1 min-w-0">
               <p style={{ color: C.text }} className="font-bold text-sm truncate">{fav.name}</p>
-              <p style={{ color: C.muted }} className="text-[10px] mt-0.5">
-                {Object.values(fav.config?.classCounts || {}).reduce((a, b) => a + b, 0)} Klassen · {fav.config?.trainerCount || 0} Trainer · {fmtDate(new Date(fav.savedAt))}
-              </p>
+              <div style={{ color: C.muted }} className="text-[9px] mt-1 space-y-0.5">
+                <p>
+                  {Object.entries(fav.config?.classCounts || {}).filter(([,v])=>v>0).map(([i,v])=>`${v}×${fav.config?.classSizes?.[i]||'?'}`).join(' · ')} Schüler · {fav.config?.trainerCount || 0} Trainer · {fav.config?.courseSlotCount || 0} Kurse
+                </p>
+                <p className="font-mono opacity-60">PW-S: {fav.config?.studentPwd || '—'} · PW-T: {fav.config?.trainerPwd || '—'}</p>
+                <p className="opacity-50">{fmtDate(new Date(fav.savedAt))}</p>
+              </div>
             </div>
             <button onClick={() => loadFavorite(fav)} style={{ backgroundColor: C.accent1 }} className="text-white text-[10px] font-bold uppercase px-3 py-1.5 rounded-lg hover:brightness-110 transition-all">Laden</button>
             <button onClick={() => deleteFavorite(fav.id)} className="p-1.5 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"><Trash2 size={14} /></button>
@@ -724,9 +792,8 @@ const App = () => {
           </table>
         )}
       </div>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex justify-between items-center shrink-0">
-        {exportHistory.length > 0 && <button onClick={() => { if (window.confirm('Gesamte History löschen?')) setExportHistory([]); }} className="text-rose-400 hover:text-rose-600 text-[10px] font-bold uppercase flex items-center gap-1 px-2 py-1 hover:bg-rose-50 rounded-lg transition-all"><Trash2 size={12} /> Leeren</button>}
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-6 py-2 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all ml-auto">Schließen</button>
+      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex justify-end shrink-0">
+        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-6 py-2 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all">Schließen</button>
       </div>
     </ModalShell>
   );
@@ -871,7 +938,7 @@ const App = () => {
             {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
           <div style={{ backgroundColor: C.card, borderColor: C.border, color: C.muted }} className="flex items-center gap-2 px-3 py-1.5 rounded-lg border shadow-sm text-[9px] font-bold uppercase tracking-widest">
-            0.1.6 <span style={{ width: 1, backgroundColor: C.border }} className="h-3 inline-block" /> EBCL INTERNATIONAL
+            {appVersion} <span style={{ width: 1, backgroundColor: C.border }} className="h-3 inline-block" /> EBCL INTERNATIONAL
           </div>
         </div>
       </header>
@@ -897,22 +964,7 @@ const App = () => {
 
           {/* Actions */}
           <section style={{ backgroundColor: C.card, borderColor: C.border }} className="p-4 rounded-3xl border shadow-sm shrink-0">
-            {/* Favoriten Schnellwahl */}
-            {favorites.length > 0 && (
-              <div className="mb-3">
-                <label style={{ color: C.muted }} className="text-[9px] font-bold uppercase tracking-widest block mb-1.5">⭐ Favorit laden</label>
-                <div className="relative">
-                  <select onChange={e => { const f = favorites.find(x => x.id === e.target.value); if (f) loadFavorite(f); e.target.value = ''; }} defaultValue=""
-                    style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }} className="w-full appearance-none border rounded-xl pl-3 pr-8 py-2 text-[11px] font-medium outline-none cursor-pointer">
-                    <option value="" disabled>— Institut wählen —</option>
-                    {favorites.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                  </select>
-                  <ChevronDown size={14} style={{ color: C.muted }} className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                </div>
-              </div>
-            )}
-
-            <button onClick={() => setActiveModal('coursePreview')} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2">
+              <button onClick={() => setActiveModal('coursePreview')} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2">
               <Eye size={16} /> Kursübersicht
             </button>
 
