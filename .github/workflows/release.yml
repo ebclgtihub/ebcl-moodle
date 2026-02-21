@@ -1,0 +1,48 @@
+name: "Publish Release"
+
+on:
+  push:
+    branches:
+      - main # Der Build startet jedes Mal, wenn du auf main pusht
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # Erstellt .dmg
+          - platform: "windows-latest" # Erstellt .exe / .msi
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: install frontend dependencies
+        run: npm install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: app-v__VERSION__ # Wird automatisch durch Version aus package.json ersetzt
+          releaseName: "EBCL Moodle v__VERSION__"
+          releaseBody: "Automatischer Build von GitHub Actions"
+          releaseDraft: true
+          prerelease: false

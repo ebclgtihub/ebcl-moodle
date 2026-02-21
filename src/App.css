@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+/* 1. Globaler Reset: Wir nehmen das klobige Standard-Styling weg */
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  background-color: #FFFEF4; /* Dein EBCL-Beige */
+  color: #1e293b;
+  line-height: 1.5;
+}
+
+/* 2. Platz schaffen: Die App darf den ganzen Bildschirm nutzen */
+body, html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  
+}
+
+/* 3. Der Übeltäter-Fix: Vite templates zentrieren oft alles im #root. 
+   Wir schalten das aus, damit dein Dashboard links oben startet und volle Breite hat. */
+#root {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  display: block; /* Verhindert das Zentrieren */
+  text-align: left;
+}
+button, 
+select, 
+a, 
+[role="button"] {
+  cursor: pointer !important;
+}
+
+/* Falls du interaktive Divs hast, die Tailwind-Klassen nutzen */
+.cursor-pointer {
+  cursor: pointer;
+}
+  
