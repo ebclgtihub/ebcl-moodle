@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { LazyStore } from '@tauri-apps/plugin-store';
+import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import {
   Users, FileSpreadsheet, CheckCircle2, Building2, Plus,
   Loader2, Table as TableIcon, Check, AlertTriangle, ChevronDown,
@@ -42,8 +43,8 @@ const DEFAULT_CONFIG = {
   trainerPwd: '***ENTFERNT***',
   enrolPeriod: 31,
   enrolDate: new Date().toISOString().split('T')[0],
-  classSizes: [20, 30, 40, 50],
-  classCounts: { 0: 2, 1: 1, 2: 0, 3: 0 },
+  classSizes: [15, 20, 30, 40],
+  classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
   classNames: {},
   trainerCount: 2,
   courseSlotCount: 4,
@@ -119,6 +120,9 @@ const App = () => {
   const [favorites, setFavorites] = useState([]);
   const [exportHistory, setExportHistory] = useState([]);
   const [invalidClassIds, setInvalidClassIds] = useState(new Set());
+  const [pendingUpdate, setPendingUpdate] = useState(null);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState(0);
 
   const saveTimeoutRef = useRef(null);
   const toastIdRef = useRef(0);
@@ -150,6 +154,37 @@ const App = () => {
     window.addEventListener('online', on); window.addEventListener('offline', off);
     return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
   }, [addToast]);
+
+  // ─── Updater ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try {
+        const update = await checkUpdate();
+        if (update) setPendingUpdate(update);
+      } catch { /* dev-mode oder offline – still fail */ }
+    }, 3000);
+    return () => clearTimeout(t);
+  }, []); // eslint-disable-line
+
+  const handleInstallUpdate = useCallback(async () => {
+    if (!pendingUpdate) return;
+    setIsInstalling(true);
+    setInstallProgress(0);
+    try {
+      let downloaded = 0;
+      let total = 0;
+      await pendingUpdate.downloadAndInstall(event => {
+        if (event.event === 'Started') { total = event.data.contentLength ?? 0; }
+        if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          setInstallProgress(total > 0 ? Math.round((downloaded / total) * 100) : 0);
+        }
+        if (event.event === 'Finished') { setInstallProgress(100); }
+      });
+      addToast('Update installiert — App wird neu gestartet…', 'success', 0);
+      setPendingUpdate(null);
+    } catch { addToast('Update-Installation fehlgeschlagen.', 'error'); setIsInstalling(false); }
+  }, [pendingUpdate, addToast]);
 
   // ─── Store: Laden ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -304,10 +339,11 @@ const App = () => {
     const activeIds = config.selectedPoolCourseIds.slice(0, config.courseSlotCount).filter(id => id !== 'none').map(String);
     const stillBad = new Set();
     classRows.forEach(r => {
-      if (!(classMatrix[r.id] || []).some(id => activeIds.includes(String(id)))) stillBad.add(r.id);
+      const assigned = (classMatrix[r.id] || []).map(String);
+      if (!assigned.some(id => activeIds.includes(id))) stillBad.add(r.id);
     });
     setInvalidClassIds(stillBad);
-  }, [classMatrix, config.selectedPoolCourseIds, config.courseSlotCount, classRows]); // eslint-disable-line
+  }, [classMatrix, classRows, config.selectedPoolCourseIds, config.courseSlotCount]); // eslint-disable-line
   const updateCourseSlot = useCallback((i, id) => setConfig(prev => { const ids = [...prev.selectedPoolCourseIds]; ids[i] = id; return { ...prev, selectedPoolCourseIds: ids }; }), []);
 
   // ─── Alle Zuweisen ────────────────────────────────────────────────────────
@@ -324,10 +360,16 @@ const App = () => {
   }, [activeMatrixCourses, classRows, addToast]);
 
   // ─── Reset ────────────────────────────────────────────────────────────────
-  const handleReset = useCallback(async () => {
-    if (!window.confirm('Alle Einstellungen und Matrix zurücksetzen?')) return;
+  const handleSettingsReset = useCallback(() => {
+    setConfig(p => ({ ...p, classSizes: [...DEFAULT_CONFIG.classSizes], classNames: {} }));
+    addToast('Klassengrößen & Namen zurückgesetzt (15/20/30/40).', 'success');
+  }, [addToast]);
+
+  const handleFullReset = useCallback(async () => {
+    if (!window.confirm('ALLE Daten löschen? (Einstellungen, Matrix, Favoriten, History)')) return;
     setConfig(DEFAULT_CONFIG); setClassMatrix({}); setGeneratedData([]); setIsGenerated(false); setInvalidClassIds(new Set());
-    try { await store.clear(); await store.save(); addToast('Zurückgesetzt.', 'success'); }
+    setFavorites([]); setExportHistory([]);
+    try { await store.clear(); await store.save(); addToast('Alle Daten gelöscht.', 'success'); }
     catch { addToast('Reset fehlgeschlagen.', 'error'); }
   }, [addToast]);
 
@@ -364,7 +406,10 @@ const App = () => {
     if (!classRows.length && !config.trainerCount) return addToast('Keine Klassen oder Trainer.', 'error');
     const activeIds = activeMatrixCourses.map(c => String(c.id));
     const badIds = new Set();
-    classRows.forEach(r => { if (!(classMatrix[r.id] || []).some(id => activeIds.includes(String(id)))) badIds.add(r.id); });
+    classRows.forEach(r => {
+      const assigned = (classMatrix[r.id] || []).map(String);
+      if (!assigned.some(id => activeIds.includes(id))) badIds.add(r.id);
+    });
     if (badIds.size) { setInvalidClassIds(badIds); return addToast(`${badIds.size} Klasse(n) ohne Kurszuweisung — rot markiert.`, 'error'); }
     setInvalidClassIds(new Set());
     const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
@@ -524,7 +569,7 @@ const App = () => {
             <div style={{ color: C.main, backgroundColor: C.main + '15' }} className="p-1.5 rounded-lg"><Zap size={16} /></div>
             <h4 style={{ color: C.text }} className="text-sm font-bold uppercase tracking-widest">Was macht dieses Programm?</h4>
           </div>
-          <p style={{ color: C.muted }} className="text-xs leading-relaxed pl-9 border-l-2" style={{ borderColor: C.border }}>
+          <p style={{ color: C.muted, borderColor: C.border }} className="text-xs leading-relaxed pl-9 border-l-2">
             Als EBCL-Mitarbeiter erstellst du mit diesem Tool hunderte Moodle-Zugänge für Partnerinstitute. Alle Einstellungen werden automatisch lokal gespeichert und sind beim nächsten Start sofort wieder verfügbar.
           </p>
         </section>
@@ -608,8 +653,8 @@ const App = () => {
       </div>
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
         <div className="flex items-center gap-3">
-          <button onClick={handleReset} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all"><RefreshCw size={12} /> Zurücksetzen</button>
-          <span style={{ color: C.muted }} className="text-[9px] opacity-50">Alle Daten löschen</span>
+          <button onClick={handleSettingsReset} className="text-amber-600 hover:text-amber-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-amber-50 px-3 py-2 rounded-lg transition-all" title="Klassengrößen auf 15/20/30/40 und Namen auf Standard zurücksetzen"><RefreshCw size={12} /> Zurücksetzen</button>
+          <button onClick={handleFullReset} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all" title="Alle Daten löschen"><Trash2 size={12} /> Alle Daten löschen</button>
         </div>
         <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-xs">Schließen</button>
       </div>
@@ -652,27 +697,27 @@ const App = () => {
   );
 
   const renderHistoryModal = () => (
-    <ModalShell maxW="max-w-2xl">
+    <ModalShell maxW="max-w-3xl">
       <ModalHeader icon={<History size={18} />} title="Export-History" sub={`${exportHistory.length} Exporte gesamt`} onClose={() => setActiveModal(null)} />
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-auto">
         {exportHistory.length === 0 ? (
           <div className="py-12 text-center">
             <History size={32} style={{ color: C.muted }} className="mx-auto mb-3 opacity-30" />
             <p style={{ color: C.muted }} className="text-sm">Noch keine Exporte durchgeführt.</p>
           </div>
         ) : (
-          <table className="w-full text-[11px]">
+          <table className="text-[11px]" style={{ minWidth: '700px', width: '100%' }}>
             <thead style={{ backgroundColor: C.subtle, borderColor: C.border }} className="sticky top-0 border-b">
-              <tr>{['Typ', 'Institut', 'Accounts', 'Datum', 'Datei'].map(h => <th key={h} style={{ color: C.muted }} className="px-4 py-3 text-left text-[9px] font-semibold uppercase tracking-widest">{h}</th>)}</tr>
+              <tr>{['Typ', 'Institut', 'Accounts', 'Datum', 'Datei'].map(h => <th key={h} style={{ color: C.muted }} className="px-4 py-3 text-left text-[9px] font-semibold uppercase tracking-widest whitespace-nowrap">{h}</th>)}</tr>
             </thead>
             <tbody>
               {exportHistory.map(e => (
                 <tr key={e.id} style={{ borderColor: C.border }} className="border-b hover:bg-black/5 transition-colors">
-                  <td className="px-4 py-3"><span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${e.type === 'PDF' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>{e.type}</span></td>
-                  <td style={{ color: C.text }} className="px-4 py-3 font-semibold">{e.institute}</td>
-                  <td style={{ color: C.muted }} className="px-4 py-3"><span style={{ color: C.text }} className="font-bold">{e.accounts}</span> · {e.trainers}T/{e.students}S</td>
-                  <td style={{ color: C.muted }} className="px-4 py-3 tabular-nums">{fmtDateTime(new Date(e.date))}</td>
-                  <td style={{ color: C.muted }} className="px-4 py-3 truncate max-w-[150px] font-mono text-[9px]">{e.filename}</td>
+                  <td className="px-4 py-3 whitespace-nowrap"><span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${e.type === 'PDF' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>{e.type}</span></td>
+                  <td style={{ color: C.text }} className="px-4 py-3 font-semibold whitespace-nowrap">{e.institute}</td>
+                  <td style={{ color: C.muted }} className="px-4 py-3 whitespace-nowrap"><span style={{ color: C.text }} className="font-bold">{e.accounts}</span> · {e.trainers}T/{e.students}S</td>
+                  <td style={{ color: C.muted }} className="px-4 py-3 tabular-nums whitespace-nowrap">{fmtDateTime(new Date(e.date))}</td>
+                  <td style={{ color: C.muted }} className="px-4 py-3 font-mono text-[9px] whitespace-nowrap">{e.filename}</td>
                 </tr>
               ))}
             </tbody>
@@ -779,6 +824,27 @@ const App = () => {
       {activeModal === 'history' && renderHistoryModal()}
       {activeModal === 'coursePreview' && renderCoursePreviewModal()}
       {activeModal === 'dataPreview' && renderDataPreviewModal()}
+
+      {/* UPDATE BANNER */}
+      {pendingUpdate && (
+        <div style={{ backgroundColor: C.accent1, borderColor: C.accent1 }} className="shrink-0 mb-3 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-4 text-white shadow-lg">
+          <div className="flex items-center gap-2.5 text-xs font-semibold">
+            <Zap size={15} className="shrink-0" />
+            <span>Update verfügbar: <span className="font-bold">v{pendingUpdate.version}</span></span>
+            {isInstalling && installProgress > 0 && (
+              <span className="opacity-70">({installProgress}%)</span>
+            )}
+          </div>
+          <button
+            onClick={handleInstallUpdate}
+            disabled={isInstalling}
+            className="shrink-0 bg-white/20 hover:bg-white/30 disabled:opacity-50 px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all flex items-center gap-1.5 active:scale-95"
+          >
+            {isInstalling ? <Loader2 size={12} className="animate-spin" /> : <FileDown size={12} />}
+            {isInstalling ? `Installiere… ${installProgress}%` : 'Jetzt installieren'}
+          </button>
+        </div>
+      )}
 
       {/* HEADER */}
       <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-5 shrink-0">
@@ -1002,25 +1068,37 @@ const App = () => {
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center justify-between">
                             <span style={{ color: C.muted }} className="text-[9px] uppercase tracking-widest font-semibold">Kurs {i + 1}</span>
-                            {config.selectedPoolCourseIds[i] !== 'none' && (
-                              <button
-                                onClick={() => {
-                                  const cid = String(config.selectedPoolCourseIds[i]);
-                                  setClassMatrix(prev => {
-                                    const next = { ...prev };
-                                    classRows.forEach(r => { next[r.id] = [...new Set([...(next[r.id] || []).map(String), cid])]; });
-                                    return next;
-                                  });
-                                  setInvalidClassIds(new Set());
-                                  addToast(`Alle Klassen → Kurs ${i + 1} zugewiesen.`, 'success', 2000);
-                                }}
-                                title={`Alle Klassen diesem Kurs zuweisen`}
-                                style={{ color: C.accent2, backgroundColor: C.accent2 + '15' }}
-                                className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-md hover:brightness-95 transition-all flex items-center gap-0.5"
-                              >
-                                <CheckSquare size={10} /> Alle
-                              </button>
-                            )}
+                            {config.selectedPoolCourseIds[i] !== 'none' && (() => {
+                              const cid = String(config.selectedPoolCourseIds[i]);
+                              const allAssigned = classRows.length > 0 && classRows.every(r => (classMatrix[r.id] || []).map(String).includes(cid));
+                              return (
+                                <button
+                                  onClick={() => {
+                                    if (allAssigned) {
+                                      setClassMatrix(prev => {
+                                        const next = { ...prev };
+                                        classRows.forEach(r => { next[r.id] = (next[r.id] || []).map(String).filter(x => x !== cid); });
+                                        return next;
+                                      });
+                                      addToast(`Kurs ${i + 1} von allen Klassen entfernt.`, 'success', 2000);
+                                    } else {
+                                      setClassMatrix(prev => {
+                                        const next = { ...prev };
+                                        classRows.forEach(r => { next[r.id] = [...new Set([...(next[r.id] || []).map(String), cid])]; });
+                                        return next;
+                                      });
+                                      setInvalidClassIds(new Set());
+                                      addToast(`Alle Klassen → Kurs ${i + 1} zugewiesen.`, 'success', 2000);
+                                    }
+                                  }}
+                                  title={allAssigned ? `Kurs ${i + 1} von allen Klassen entfernen` : `Alle Klassen diesem Kurs zuweisen`}
+                                  style={{ color: allAssigned ? C.main : C.accent2, backgroundColor: (allAssigned ? C.main : C.accent2) + '15' }}
+                                  className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-md hover:brightness-95 transition-all flex items-center gap-0.5"
+                                >
+                                  {allAssigned ? <Square size={10} /> : <CheckSquare size={10} />} Alle
+                                </button>
+                              );
+                            })()}
                           </div>
                           <div className="relative w-full">
                             <select value={config.selectedPoolCourseIds[i] || 'none'} onChange={e => updateCourseSlot(i, e.target.value)} style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="w-full appearance-none border rounded-md pl-2 pr-6 py-1.5 text-[11px] font-medium outline-none cursor-pointer hover:border-blue-300 transition-all shadow-sm truncate">
