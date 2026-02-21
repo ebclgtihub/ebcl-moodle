@@ -805,7 +805,7 @@ const App = () => {
             {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
           <div style={{ backgroundColor: C.card, borderColor: C.border, color: C.muted }} className="flex items-center gap-2 px-3 py-1.5 rounded-lg border shadow-sm text-[9px] font-bold uppercase tracking-widest">
-            0.1.4 <span style={{ width: 1, backgroundColor: C.border }} className="h-3 inline-block" /> EBCL INTERNATIONAL
+            0.1.5 <span style={{ width: 1, backgroundColor: C.border }} className="h-3 inline-block" /> EBCL INTERNATIONAL
           </div>
         </div>
       </header>
