@@ -194,16 +194,21 @@ const App = () => {
 
   // ─── Updater ──────────────────────────────────────────────────────────────
   useEffect(() => {
+    if (import.meta.env.DEV) return; // Kein Auto-Check im Dev-Modus
     const t = setTimeout(async () => {
       try {
         const update = await checkUpdate();
         if (update) setPendingUpdate(update);
-      } catch { /* dev-mode oder offline – still fail */ }
+      } catch { /* still fail */ }
     }, 3000);
     return () => clearTimeout(t);
   }, []); // eslint-disable-line
 
   const handleManualUpdateCheck = useCallback(async () => {
+    if (import.meta.env.DEV) {
+      addToast('Updates nur in der fertigen App prüfbar (nicht im Dev-Modus).', 'info', 4000);
+      return;
+    }
     setIsCheckingUpdate(true);
     try {
       const update = await checkUpdate();
@@ -214,7 +219,15 @@ const App = () => {
       } else {
         addToast('App ist bereits aktuell.', 'success', 3000);
       }
-    } catch { addToast('Update-Prüfung fehlgeschlagen.', 'error'); }
+    } catch (e) {
+      console.error('Update check error:', e);
+      const msg = String(e?.message || e || '');
+      if (msg.includes('404') || msg.includes('Not Found')) {
+        addToast('Kein Update-Server gefunden (noch kein Release veröffentlicht?).', 'error');
+      } else {
+        addToast(`Update-Prüfung fehlgeschlagen: ${msg || 'Unbekannter Fehler'}`, 'error');
+      }
+    }
     finally { setIsCheckingUpdate(false); }
   }, [addToast]);
 
