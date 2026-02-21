@@ -8,7 +8,7 @@
   "permissions": [
     "core:default",
     "updater:default",
-    "event:default",
-    "shell:allow-open"
+    "core:event:default",
+    "opener:default"
   ]
 }
