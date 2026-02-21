@@ -13,6 +13,30 @@ import {
  * - LOGIK: Sicherere Type-Checks bei numerischen Inputs.
  */
 
+// --- Tauri Store Setup ---
+// HINWEIS: Da diese Web-Vorschau (Canvas) keine nativen Tauri-Plugins kompilieren kann,
+// verwenden wir hier einen funktionsgleichen Fallback (localStorage) für die Vorschau.
+// 
+// FÜR DEINE LOKALE TAURI-APP (z.B. in VS Code):
+// 1. Entkommentiere den folgenden Import:
+// import { LazyStore } from '@tauri-apps/plugin-store';
+// 2. Ersetze den Fallback-Store unten einfach durch:
+// const store = new LazyStore('settings.json');
+
+const store = {
+  async get(key) {
+    const val = localStorage.getItem(`moodle_settings_${key}`);
+    return val ? JSON.parse(val) : null;
+  },
+  async set(key, value) {
+    localStorage.setItem(`moodle_settings_${key}`, JSON.stringify(value));
+  },
+  async save() {
+    // Dummy-Funktion für die Web-Vorschau.
+    // In Tauri sorgt dieser Aufruf dafür, dass physisch in die settings.json geschrieben wird!
+  }
+};
+
 const App = () => {
   // --- Konfiguration & State ---
   const [config, setConfig] = useState({
@@ -38,6 +62,55 @@ const App = () => {
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [libsReady, setLibsReady] = useState(false);
   const [validationError, setValidationError] = useState(null);
+  const [isStoreLoaded, setIsStoreLoaded] = useState(false);
+
+  // --- Tauri Store: Laden ---
+  useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        // Lade die allgemeine Konfiguration
+        const savedConfig = await store.get('appConfig');
+        if (savedConfig) {
+          setConfig(savedConfig);
+        }
+        
+        // Lade die Matrix-Zuweisungen
+        const savedMatrix = await store.get('classMatrix');
+        if (savedMatrix) {
+          setClassMatrix(savedMatrix);
+        }
+      } catch (error) {
+        console.error("Fehler beim Laden der Einstellungen:", error);
+      } finally {
+        setIsStoreLoaded(true); // Wichtig für den Auto-Save, damit wir nicht leere Werte speichern
+      }
+    };
+    loadSettings();
+  }, []);
+
+  // --- Tauri Store: Speichern (Auto-Save) ---
+  useEffect(() => {
+    // Nicht speichern, bevor die anfänglichen Daten geladen wurden!
+    if (!isStoreLoaded) return;
+
+    const saveSettings = async () => {
+      try {
+        await store.set('appConfig', config);
+        await store.set('classMatrix', classMatrix);
+        await store.save(); // Auf die Platte schreiben (Tauri)
+      } catch (error) {
+        console.error("Fehler beim Speichern der Einstellungen:", error);
+      }
+    };
+
+    // Debounce: Erst 500ms nach der letzten Eingabe auf die Festplatte schreiben
+    // (Verhindert ständiges Speichern beim flüssigen Tippen)
+    const timeoutId = setTimeout(() => {
+      saveSettings();
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [config, classMatrix, isStoreLoaded]);
 
   const COURSE_API_URL = "***ENTFERNT***";
 
@@ -328,6 +401,7 @@ const App = () => {
       const doc = new jsPDF('p', 'mm', 'a4');
       const primary = [157, 32, 43]; // #9D202B
       const today = new Date().toISOString().split('T')[0];
+      const filename = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${today}.pdf`;
 
       const renderHeader = (title, info) => {
         doc.setFontSize(20).setTextColor(...primary).setFont("helvetica", "bold").text(config.institute.toUpperCase(), 15, 20);
@@ -361,7 +435,7 @@ const App = () => {
       // Trainer Seite
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length > 0) {
-        renderHeader("Zugangsdaten: Trainer-Team", `TRAINER: ${trainers.length}`);
+        renderHeader("Zugangsdaten: Trainer", `TRAINER: ${trainers.length}`);
         doc.autoTable({ 
           head: [["Name (Eingabefeld)", "Username", "Passwort", ...activeMatrixCourses.map((_,i) => `Kurs ${i+1}`)]], 
           body: trainers.map(t => ["", t.user, t.pw, ...t.courses.map(c => c.label)]), 
@@ -389,11 +463,11 @@ const App = () => {
       const pageCount = doc.internal.getNumberOfPages();
       for (let i = 1; i <= pageCount; i++) { 
         doc.setPage(i); 
-        doc.setFontSize(7).setTextColor(150).text("EBCL International GmbH", 15, 287); 
+        doc.setFontSize(7).setTextColor(150).text(filename, 15, 287); 
         doc.text(`Seite ${i} von ${pageCount}`, 185, 287, { align: 'right' });
       }
 
-      doc.save(`EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${today}.pdf`);
+      doc.save(filename);
     } catch (e) {
       console.error("PDF Export Fehler:", e);
       setValidationError("Fehler beim Erstellen des PDFs.");
@@ -413,7 +487,7 @@ const App = () => {
             <div style={{ backgroundColor: colors.main }} className="p-3.5 text-white rounded-2xl shadow-lg shadow-red-900/10"><BookOpen size={24}/></div>
             <div>
               <h3 className="text-xl font-bold text-slate-800 tracking-tight leading-none uppercase">Einfach erklärt</h3>
-              <p className="text-[10px] text-slate-500 mt-1.5 font-semibold uppercase tracking-[0.2em]">Bedienungsanleitung</p>
+              <p className="text-[10px] text-slate-500 mt-1.5 font-semibold uppercase tracking-[0.2em]">Workflow für Mitarbeiter</p>
             </div>
           </div>
           <button onClick={() => setActiveModal(null)} title="Schließen" className="p-2 hover:bg-slate-200 rounded-full text-slate-400 transition-all active:scale-90"><X size={24}/></button>
@@ -422,17 +496,17 @@ const App = () => {
         <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8">
           <section className="relative">
             <div className="flex items-center gap-2.5 mb-3"><div style={{ color: colors.main }} className="bg-red-50 p-1.5 rounded-lg"><Zap size={16}/></div><h4 className="text-sm font-bold text-slate-800 uppercase tracking-widest">Was macht dieses Programm?</h4></div>
-            <p className="text-xs text-slate-500 leading-relaxed pl-9 border-l-2 border-slate-100">Mit diesem Tool erstellen Sie hunderte Moodle-Zugänge in wenigen Sekunden. Planen Sie hier alles vor und erhalten am Ende fertige Dateien zum Hochladen oder Ausdrucken.</p>
+            <p className="text-xs text-slate-500 leading-relaxed pl-9 border-l-2 border-slate-100">Als EBCL-Mitarbeiter erstellst du mit diesem Tool hunderte Moodle-Zugänge in wenigen Sekunden für unsere Partnerinstitute. Plane hier alles vor und erhalte am Ende fertige CSV-Dateien für den Moodle-Upload und PDF-Listen zur Weitergabe an das Institut.</p>
           </section>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pl-1 text-slate-500 text-[11px]">
             <div className="space-y-6">
-              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">01</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Einstellungen</h5><p>Geben Sie Institutsnamen ein und legen Sie Klassenanzahl und Größen fest.</p></div></div>
-              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">02</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Kursverteilung</h5><p>Wählen Sie oben Kurse aus und markieren Sie diese in der Tabelle per Plus (+).</p></div></div>
+              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">01</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Einstellungen</h5><p>Gib den Namen des Partner-Instituts ein und definiere die Anzahl und Größe der benötigten Klassen.</p></div></div>
+              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">02</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Kursverteilung</h5><p>Wähle oben die gewünschten Kurse aus dem Moodle-Pool und weise sie den Klassen per Plus (+) zu.</p></div></div>
             </div>
             <div className="space-y-6">
-              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">03</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Lehrer-Zugang</h5><p>Trainer erhalten automatisch Zugriff auf alle gewählten Kurse und alle Gruppen.</p></div></div>
-              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">04</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Ergebnis sichern</h5><p><b>CSV:</b> Für den Moodle-Upload.<br/><b>PDF:</b> Listen zum Ausdrucken.</p></div></div>
+              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">03</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Trainer-Zugang</h5><p>Die angelegten Trainer erhalten automatisch Zugriff auf alle gewählten Kurse und Klassen des Instituts.</p></div></div>
+              <div className="flex gap-3 items-start"><span style={{ color: colors.accent1, backgroundColor: colors.accent1 + "10" }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">04</span><div className="space-y-1"><h5 className="font-bold text-slate-700 uppercase tracking-wider">Ergebnis sichern</h5><p><b>CSV:</b> Deine Import-Datei für Moodle.<br/><b>PDF:</b> Zugangsdaten-Liste für das Partnerinstitut.</p></div></div>
             </div>
           </div>
         </div>
@@ -554,6 +628,9 @@ const App = () => {
           </table>
         </div>
         <div className="p-5 bg-slate-50 border-t flex justify-end gap-3">
+          <button disabled={isExportingPDF} onClick={downloadPDF} style={{ backgroundColor: colors.accent1 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
+            {isExportingPDF ? <Loader2 size={14} className="animate-spin"/> : <FileDown size={14}/>} PDF
+          </button>
           <button onClick={downloadCSV} style={{ backgroundColor: colors.accent2 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs"><FileSpreadsheet size={14}/> CSV</button>
           <button onClick={() => setActiveModal(null)} style={{ backgroundColor: colors.main }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm text-xs">Schließen</button>
         </div>
@@ -583,7 +660,7 @@ const App = () => {
           </p>
         </div>
         <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
-           <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">V1</div>
+           <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">V2</div>
            <div className="h-3 w-px bg-slate-200"></div>
            <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">EBCL INTERNATIONAL</div>
         </div>
@@ -689,7 +766,7 @@ const App = () => {
                       <input type="number" min="0" name="trainerCount" value={config.trainerCount} onChange={handleInput} style={{ color: colors.main }} className="w-full bg-transparent text-sm font-semibold outline-none"/>
                     </div>
                     <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm focus-within:border-blue-300 transition-colors">
-                      <label className="text-[8px] font-semibold text-slate-400 uppercase block mb-1">Kurs (Anz.)</label>
+                      <label className="text-[8px] font-semibold text-slate-400 uppercase block mb-1">Kurs (Anz.Test)</label>
                       <input type="number" min="1" max="8" name="courseSlotCount" value={config.courseSlotCount} onChange={handleInput} style={{ color: colors.accent1 }} className="w-full bg-transparent text-sm font-semibold outline-none"/>
                     </div>
                   </div>
