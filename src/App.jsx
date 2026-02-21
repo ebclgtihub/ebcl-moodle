@@ -583,7 +583,7 @@ const App = () => {
           </p>
         </div>
         <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
-           <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">V2</div>
+           <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">V1</div>
            <div className="h-3 w-px bg-slate-200"></div>
            <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">EBCL INTERNATIONAL</div>
         </div>
@@ -689,7 +689,7 @@ const App = () => {
                       <input type="number" min="0" name="trainerCount" value={config.trainerCount} onChange={handleInput} style={{ color: colors.main }} className="w-full bg-transparent text-sm font-semibold outline-none"/>
                     </div>
                     <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm focus-within:border-blue-300 transition-colors">
-                      <label className="text-[8px] font-semibold text-slate-400 uppercase block mb-1">Kurs Anzahl</label>
+                      <label className="text-[8px] font-semibold text-slate-400 uppercase block mb-1">Kurs (Anz.)</label>
                       <input type="number" min="1" max="8" name="courseSlotCount" value={config.courseSlotCount} onChange={handleInput} style={{ color: colors.accent1 }} className="w-full bg-transparent text-sm font-semibold outline-none"/>
                     </div>
                   </div>
