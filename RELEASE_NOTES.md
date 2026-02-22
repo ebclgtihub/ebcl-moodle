@@ -1,8 +1,11 @@
 # Release Notes
 
 ## Unreleased
-- Test Release
+
 ---
+
+## v0.4.3 - 2026-02-22
+- Test Release
 
 ## v0.4.1 - 2026-02-22
 - PDF Spalte "Name" in Formfeld umgewandelt!

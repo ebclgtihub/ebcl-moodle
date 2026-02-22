@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
-# commit-msg Hook: Bumpt die Version automatisch via Conventional Commits
+# prepare-commit-msg: läuft nachdem die Message gesetzt wurde,
+# aber BEVOR git den Commit-Tree berechnet → git add greift noch.
 # fix:  → patch  (0.3.0 → 0.3.1)
 # feat: → minor  (0.3.0 → 0.4.0)
 # feat!: / BREAKING CHANGE → major (0.3.0 → 1.0.0)
 
-COMMIT_MSG=$(cat "$1")
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+
+# Nur bei normalen Commits (nicht bei amend, merge, squash, template)
+if [ -n "$COMMIT_SOURCE" ] && [ "$COMMIT_SOURCE" != "message" ]; then
+  exit 0
+fi
+
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
 
 # Bump-Typ bestimmen
-if echo "$COMMIT_MSG" | grep -qE "^[a-z]+(\(.+\))?!:|^BREAKING CHANGE"; then
+if echo "$COMMIT_MSG" | grep -qE "^[a-z]+(\(.+\))?!:|BREAKING CHANGE"; then
   BUMP="major"
 elif echo "$COMMIT_MSG" | grep -qE "^feat(\(.+\))?:"; then
   BUMP="minor"
 elif echo "$COMMIT_MSG" | grep -qE "^fix(\(.+\))?:"; then
   BUMP="patch"
 else
-  # Kein Conventional-Commit-Präfix → keine Versionsänderung
   exit 0
 fi
 
