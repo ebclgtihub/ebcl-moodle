@@ -1,7 +1,7 @@
 # Release Notes
 
 ## Unreleased
-
+- PDF Spalte "Name" in Formfeld umgewandelt!
 ---
 
 ## v0.3.0 - 2026-02-22
