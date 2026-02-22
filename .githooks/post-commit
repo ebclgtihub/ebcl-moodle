@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# post-commit Hook: läuft NACH dem Commit → amend mit gebumpter Version
+# fix:  → patch  (0.3.0 → 0.3.1)
+# feat: → minor  (0.3.0 → 0.4.0)
+# feat!: / BREAKING CHANGE → major (0.3.0 → 1.0.0)
+
+GUARD="$(git rev-parse --git-dir)/VERSION_BUMP_GUARD"
+
+# Guard: dieser post-commit kommt von unserem eigenen amend → fertig
+if [ -f "$GUARD" ]; then
+  rm -f "$GUARD"
+  exit 0
+fi
+
+# Nicht während rebase ausführen
+if [ -d "$(git rev-parse --git-dir)/rebase-merge" ] || [ -d "$(git rev-parse --git-dir)/rebase-apply" ]; then
+  exit 0
+fi
+
+# Commit-Message des soeben erstellten Commits lesen
+COMMIT_MSG=$(git log -1 --format=%B HEAD)
+
+# Bump-Typ bestimmen
+if echo "$COMMIT_MSG" | grep -qE "^[a-z]+(\(.+\))?!:|BREAKING CHANGE"; then
+  BUMP="major"
+elif echo "$COMMIT_MSG" | grep -qE "^feat(\(.+\))?:"; then
+  BUMP="minor"
+elif echo "$COMMIT_MSG" | grep -qE "^fix(\(.+\))?:"; then
+  BUMP="patch"
+else
+  exit 0
+fi
+
+# Version bumpen
+node scripts/bump-version.js "$BUMP"
+if [ $? -ne 0 ]; then
+  echo "❌ Versions-Bump fehlgeschlagen"
+  exit 0
+fi
+
+# Geänderte Dateien stagen
+git add package.json package-lock.json src-tauri/tauri.conf.json RELEASE_NOTES.md 2>/dev/null
+
+# Guard setzen BEVOR amend → verhindert Endlosschleife
+touch "$GUARD"
+
+# Commit mit Versions-Bump ergänzen
+git commit --amend --no-edit --no-verify
+
+echo "✓ Versions-Bump ($BUMP) — im Commit enthalten"

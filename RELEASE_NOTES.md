@@ -4,6 +4,11 @@
 
 ---
 
+## v0.4.5 - 2026-02-22
+Test release 2.0
+
+## v0.4.4 - 2026-02-22
+- Kein Changelog-Eintrag.
 ## v0.4.3 - 2026-02-22
 - Test Release
 
