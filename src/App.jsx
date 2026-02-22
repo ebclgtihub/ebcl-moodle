@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import QRCode from 'qrcode';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import {
@@ -43,6 +44,7 @@ const DEFAULT_CONFIG = {
   institute: '',
   studentPwd: '***ENTFERNT***',
   trainerPwd: '***ENTFERNT***',
+  autoPassword: false,
   enrolPeriod: 31,
   enrolDate: new Date().toISOString().split('T')[0],
   classSizes: [15, 20, 30, 40],
@@ -60,7 +62,7 @@ const SHORTCUTS = [
   { keys: ['⌘/Ctrl', 'G'], desc: 'Liste generieren' },
   { keys: ['⌘/Ctrl', 'E'], desc: 'CSV exportieren' },
   { keys: ['⌘/Ctrl', 'P'], desc: 'PDF exportieren' },
-  { keys: ['⌘/Ctrl', 'A'], desc: 'Alle Kurse zuweisen' },
+  { keys: ['⌘/Ctrl', '⇧', 'A'], desc: 'Alle Kurse zuweisen' },
   { keys: ['⌘/Ctrl', '?'], desc: 'Hilfe öffnen' },
   { keys: ['Escape'], desc: 'Modal schließen' },
 ];
@@ -99,34 +101,58 @@ const Toast = ({ toasts, removeToast }) => (
   </div>
 );
 
-// ─── Klassenname-Eingabe (eigene Komponente verhindert Focus-Verlust) ──────────
+// ─── Modal-Shells (Modul-Scope = stabiler Typ, kein Remount bei App-Re-Render) ──
+const ModalShell = ({ children, C, maxW = 'max-w-3xl', zIndex = 200 }) => (
+  <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4" style={{ zIndex }}>
+    <div style={{ backgroundColor: C.card, borderColor: C.border }} className={`rounded-3xl shadow-2xl w-full ${maxW} overflow-hidden border flex flex-col max-h-[90vh]`}>{children}</div>
+  </div>
+);
+
+const ModalHeader = ({ icon, title, sub, onClose, iconBg, C }) => (
+  <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 md:p-6 border-b flex justify-between items-center shrink-0">
+    <div className="flex items-center gap-3">
+      <div style={{ backgroundColor: iconBg || C.accent1 }} className="p-2.5 text-white rounded-xl shadow-md">{icon}</div>
+      <div>
+        <h3 style={{ color: C.text }} className="font-bold uppercase tracking-tight text-sm">{title}</h3>
+        {sub && <p style={{ color: C.muted }} className="text-[9px] mt-0.5">{sub}</p>}
+      </div>
+    </div>
+    <button onClick={onClose} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full transition-colors"><X size={20} /></button>
+  </div>
+);
+
+// ─── Klassenname-Eingabe (lokaler State + onBlur = kein Focus-Verlust) ─────────
 const ClassNameRow = ({ row, savedValue, onUpdate, C }) => {
-  const [val, setVal] = React.useState(savedValue || '');
-  const ownUpdate = React.useRef(false);
-
-  // Nur von aussen (z.B. Reset) den Wert überschreiben, nicht bei eigenem Tippen
-  React.useEffect(() => {
-    if (!ownUpdate.current) setVal(savedValue || '');
-    ownUpdate.current = false;
-  }, [savedValue]);
-
-  const handleChange = (e) => {
-    ownUpdate.current = true;
-    const v = e.target.value;
-    setVal(v);
-    onUpdate(row.id - 1, v);
-  };
-
+  const [val, setVal] = React.useState(savedValue);
   return (
     <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center gap-3 px-3 py-2 rounded-xl border focus-within:border-blue-300 transition-colors">
       <span style={{ color: C.muted }} className="text-[10px] font-mono w-12 shrink-0">K-{String(row.id).padStart(2, '0')}</span>
-      <input type="text" value={val} onChange={handleChange}
+      <input type="text" value={val}
+        onChange={e => setVal(e.target.value)}
+        onBlur={e => onUpdate(row.id - 1, e.target.value)}
         placeholder={`Klasse-${String(row.id).padStart(2, '0')}`}
         style={{ color: C.text, backgroundColor: 'transparent' }}
         className="flex-1 text-xs font-medium outline-none placeholder:opacity-25" />
     </div>
   );
 };
+
+// ─── Passwort-Generator (Moodle-konform) ───────────────────────────────────────
+const generatePassword = () => {
+  const U = 'ABCDEFGHJKLMNPQRSTUVWXYZ', L = 'abcdefghjkmnpqrstuvwxyz';
+  const D = '23456789', S = '!@#$%&*-=?';
+  const pool = U + L + D + S;
+  const r = s => s[Math.floor(Math.random() * s.length)];
+  return [r(U), r(L), r(D), r(S), ...Array.from({ length: 6 }, () => r(pool))]
+    .sort(() => Math.random() - 0.5).join('');
+};
+
+// ─── QR-Code Cache (wird einmalig generiert und wiederverwendet) ───────────────
+let _qrCache = null;
+const getQrDataUrl = () => _qrCache
+  ? Promise.resolve(_qrCache)
+  : QRCode.toDataURL('https://world.ebcl.eu/', { width: 120, margin: 1, errorCorrectionLevel: 'M' })
+      .then(url => { _qrCache = url; return url; });
 
 // ─── App ───────────────────────────────────────────────────────────────────────
 const App = () => {
@@ -157,6 +183,8 @@ const App = () => {
   const [appVersion, setAppVersion] = useState('...');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
+  const [helpTab, setHelpTab] = useState('workflow');
+  const [classNamesResetKey, setClassNamesResetKey] = useState(0);
   const saveTimeoutRef = useRef(null);
   const toastIdRef = useRef(0);
   const generateRef = useRef(null);
@@ -264,6 +292,12 @@ const App = () => {
         if (hist) setExportHistory(hist);
         const dm = await store.get('darkMode');
         if (dm !== null && dm !== undefined) setDarkMode(dm);
+        const sizes = await store.get('classSizes');
+        if (sizes) setConfig(p => ({ ...p, classSizes: sizes }));
+        const names = await store.get('classNames');
+        if (names) setConfig(p => ({ ...p, classNames: names }));
+        const pool = await store.get('coursePool');
+        if (pool?.length) setCourseDictionary(pool);
       } catch (e) {
         console.error('Store laden:', e);
         addToast('Einstellungen konnten nicht geladen werden.', 'error');
@@ -286,6 +320,8 @@ const App = () => {
         await store.set('favorites', favorites);
         await store.set('exportHistory', exportHistory);
         await store.set('darkMode', darkMode);
+        await store.set('classSizes', config.classSizes);
+        await store.set('classNames', config.classNames);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -296,7 +332,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [favorites, exportHistory, darkMode, isStoreLoaded]); // eslint-disable-line
+  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, isStoreLoaded]); // eslint-disable-line
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -324,9 +360,10 @@ const App = () => {
           normalized.slice(0, prev.courseSlotCount).forEach((c, i) => { if (ids[i] === 'none') ids[i] = c.id; });
           return { ...prev, selectedPoolCourseIds: ids };
         });
+        store.set('coursePool', normalized).then(() => store.save()).catch(() => {});
       }
       addToast(`${normalized.length} Kurse geladen.`, 'success', 2500);
-    } catch { addToast('Verbindung zum Kurs-Pool fehlgeschlagen.', 'error'); }
+    } catch { addToast('Verbindung zum Kurs-Pool fehlgeschlagen — verwende Cache.', 'error'); }
     finally { setIsLoadingPool(false); }
   }, [addToast]);
   useEffect(() => { fetchCoursePool(); }, [fetchCoursePool]);
@@ -353,6 +390,17 @@ const App = () => {
   const rawEndDate = useMemo(() => { const d = new Date(config.enrolDate); d.setDate(d.getDate() + parseInt(config.enrolPeriod || 0)); return d; }, [config.enrolDate, config.enrolPeriod]);
   const endDateDisplay = rawEndDate.toISOString().split('T')[0];
   const endDateFormatted = rawEndDate.toLocaleDateString('de-DE');
+
+  const totalStudents = useMemo(() => classRows.reduce((s, r) => s + r.size, 0), [classRows]);
+
+  // false | 'dauer' | 'abgelaufen'
+  const isEnrolInvalid = useMemo(() => {
+    const period = parseInt(config.enrolPeriod, 10);
+    if (!period || period <= 0) return 'dauer';
+    const end = new Date(config.enrolDate);
+    end.setDate(end.getDate() + period);
+    return end < new Date(new Date().toDateString()) ? 'abgelaufen' : false;
+  }, [config.enrolDate, config.enrolPeriod]);
 
   const getClassLabel = useCallback(row => {
     const n = config.classNames?.[row.id - 1]?.trim();
@@ -409,7 +457,8 @@ const App = () => {
   // ─── Reset ────────────────────────────────────────────────────────────────
   const handleSettingsReset = useCallback(() => {
     setConfig(p => ({ ...p, classSizes: [...DEFAULT_CONFIG.classSizes], classNames: {} }));
-    addToast('Klassengrößen & Namen zurückgesetzt (15/20/30/40).', 'success');
+    setClassNamesResetKey(k => k + 1);
+    addToast('Einstellungen zurückgesetzt.', 'success');
   }, [addToast]);
 
   const handleFullReset = useCallback(async () => {
@@ -418,6 +467,21 @@ const App = () => {
     setShowDeleteConfirm(false);
     try { await store.clear(); await store.save(); addToast('Alle Daten gelöscht.', 'success'); }
     catch { addToast('Reset fehlgeschlagen.', 'error'); }
+  }, [addToast]);
+
+  const handleSessionReset = useCallback(() => {
+    if (!window.confirm('Alle Daten wirklich löschen und neu starten?')) return;
+    setConfig(p => ({
+      ...p,
+      institute: '',
+      enrolDate: new Date().toISOString().split('T')[0],
+      selectedPoolCourseIds: Array(8).fill('none'),
+    }));
+    setClassMatrix({});
+    setGeneratedData([]);
+    setIsGenerated(false);
+    setInvalidClassIds(new Set());
+    addToast('Neue Liste gestartet.', 'success');
   }, [addToast]);
 
   // ─── Favoriten ────────────────────────────────────────────────────────────
@@ -429,7 +493,7 @@ const App = () => {
   }, [config, classMatrix, addToast]);
 
   const loadFavorite = useCallback(fav => {
-    setConfig(prev => ({ ...DEFAULT_CONFIG, ...fav.config }));
+    setConfig({ ...DEFAULT_CONFIG, ...fav.config, enrolDate: new Date().toISOString().split('T')[0] });
     setClassMatrix(fav.matrix || {});
     setIsGenerated(false); setInvalidClassIds(new Set());
     addToast(`"${fav.name}" geladen.`, 'success');
@@ -462,7 +526,7 @@ const App = () => {
     const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
     const data = [];
     for (let t = 1; t <= config.trainerCount; t++)
-      data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${t}`, mail: `trainer${t}@${instClean}.com`, pw: config.trainerPwd, courses: activeMatrixCourses });
+      data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${t}`, mail: `trainer${t}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
     let sIdx = 1;
     classRows.forEach(r => {
       const selIds = (classMatrix[r.id] || []).map(String);
@@ -470,7 +534,7 @@ const App = () => {
       const classLabel = `${config.institute}-${getClassLabel(r)}`;
       for (let i = 0; i < r.size; i++) {
         const id = String(sIdx++).padStart(3, '0');
-        data.push({ cNum: String(r.id).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.studentPwd, courses: selCourses });
+        data.push({ cNum: String(r.id).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
       }
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
@@ -504,36 +568,57 @@ const App = () => {
   const downloadPDF = useCallback(async () => {
     setIsExportingPDF(true);
     try {
+      const qrDataUrl = await getQrDataUrl().catch(() => null);
       const doc = new jsPDF('l', 'mm', 'a4');
       const primary = [157, 32, 43];
       const fname = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.pdf`;
+      const periodStr = `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`;
       const renderHeader = (title, info) => {
         doc.setFontSize(20).setTextColor(...primary).setFont('helvetica', 'bold').text(config.institute.toUpperCase(), 15, 20);
         doc.setFontSize(12).setTextColor(60).setFont('helvetica', 'normal').text(title, 15, 28);
-        doc.setFontSize(10).setTextColor(37, 99, 235).text('Portal: https://world.ebcl.eu/', 15, 34).link(15, 31, 50, 4, { url: 'https://world.ebcl.eu/' });
-        doc.setFontSize(8).setTextColor(120).text(`ZEITRAUM: ${new Date(config.enrolDate).toLocaleDateString('de-DE')} bis ${endDateFormatted} | ${info}`, 15, 42);
+        doc.setFontSize(10).setTextColor(37, 99, 235).text('Lernplattform: https://world.ebcl.eu/', 15, 34).link(15, 31, 65, 4, { url: 'https://world.ebcl.eu/' });
+        doc.setFontSize(8).setTextColor(120).text(`ZEITRAUM: ${periodStr} | ${info}`, 15, 42);
         doc.setLineWidth(0.3).setDrawColor(0).line(15, 45, 282, 45);
+        if (qrDataUrl) doc.addImage(qrDataUrl, 'PNG', 256, 4, 26, 26);
       };
-      const tOpts = courses => ({
+      // pageMap trackt welche Klasse auf welcher Seite ist (via didDrawPage-Hook)
+      const pageMap = {};
+      const tOpts = (courses, sectionLabel) => ({
         startY: 50, theme: 'grid', styles: { fontSize: 7, textColor: [0, 0, 0] },
         headStyles: { fillColor: [40, 40, 40], textColor: 255 },
         columnStyles: { 0: { cellWidth: 45 }, 1: { cellWidth: 35 }, 2: { cellWidth: 25 }, ...Object.fromEntries(courses.map((_, i) => [i + 3, { textColor: primary, fontStyle: 'bold' }])) },
         didDrawCell: ({ cell, column, section }) => { if (section === 'body' && column.index >= 3 && courses[column.index - 3]?.url) doc.link(cell.x, cell.y, cell.width, cell.height, { url: courses[column.index - 3].url }); },
+        didDrawPage: () => { pageMap[doc.internal.getCurrentPageInfo().pageNumber] = sectionLabel; },
       });
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
-        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), ...tOpts(activeMatrixCourses), didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } });
+        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`), didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } });
       }
       [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id, idx) => {
         if (trainers.length || idx > 0) doc.addPage();
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
-        renderHeader(`Teilnehmerliste: ${row ? getClassLabel(row) : `Klasse-${id}`}`, `SCHÜLER: ${students.length}`);
-        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), ...tOpts(students[0].courses) });
+        const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
+        renderHeader(`Teilnehmerliste: ${classLabel}`, `SCHÜLER: ${students.length}`);
+        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), ...tOpts(students[0].courses, `${classLabel} — ${config.institute}`) });
       });
+      // Footer auf jeder Seite: Klasseninfo + Lernplattform + Zeitraum + Seitenzahl
       const pc = doc.internal.getNumberOfPages();
-      for (let i = 1; i <= pc; i++) { doc.setPage(i).setFontSize(7).setTextColor(150).text(fname, 15, 200); doc.text(`Seite ${i} von ${pc}`, 280, 200, { align: 'right' }); }
+      for (let i = 1; i <= pc; i++) {
+        doc.setPage(i);
+        const sectionLabel = pageMap[i] || '';
+        doc.setLineWidth(0.2).setDrawColor(180).line(15, 193, 282, 193);
+        doc.setFont('helvetica', 'normal').setFontSize(6.5).setTextColor(100);
+        doc.text(sectionLabel, 15, 197);
+        doc.setTextColor(37, 99, 235);
+        doc.text('world.ebcl.eu', 148.5, 197, { align: 'center' });
+        doc.setTextColor(100);
+        doc.text(`Zeitraum: ${periodStr}`, 282, 197, { align: 'right' });
+        doc.setFontSize(6).setTextColor(160);
+        doc.text(fname, 15, 201.5);
+        doc.text(`Seite ${i} von ${pc}`, 282, 201.5, { align: 'right' });
+      }
       doc.save(fname);
       addExportEntry('PDF', fname); addToast('PDF exportiert.', 'success');
     } catch (e) { console.error(e); addToast('PDF-Export fehlgeschlagen.', 'error'); }
@@ -544,13 +629,19 @@ const App = () => {
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
   useEffect(() => {
     const h = e => {
+      // Niemals in Textfeldern auslösen
+      const tag = e.target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target?.isContentEditable) {
+        if (e.key === 'Escape') setActiveModal(null);
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       if (e.key === 'Escape') { setActiveModal(null); return; }
       if (!mod) return;
       if (e.key === 'g') { e.preventDefault(); generateRef.current?.(); }
       if (e.key === 'e') { e.preventDefault(); csvRef.current?.(); }
       if (e.key === 'p') { e.preventDefault(); pdfRef.current?.(); }
-      if (e.key === 'a') { e.preventDefault(); assignRef.current?.(); }
+      if (e.key === 'a' && e.shiftKey) { e.preventDefault(); assignRef.current?.(); }
       if (e.key === '?') { e.preventDefault(); setActiveModal('help'); }
     };
     window.addEventListener('keydown', h);
@@ -576,101 +667,247 @@ const App = () => {
   // MODALS
   // ═══════════════════════════════════════════════════════════════════════════
 
-  const ModalShell = ({ children, maxW = 'max-w-3xl', zIndex = 200 }) => (
-    <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4" style={{ zIndex }}>
-      <div style={{ backgroundColor: C.card, borderColor: C.border }} className={`rounded-3xl shadow-2xl w-full ${maxW} overflow-hidden border flex flex-col max-h-[90vh]`}>{children}</div>
-    </div>
-  );
-
-  const ModalHeader = ({ icon, title, sub, onClose, iconBg }) => (
-    <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 md:p-6 border-b flex justify-between items-center shrink-0">
-      <div className="flex items-center gap-3">
-        <div style={{ backgroundColor: iconBg || C.accent1 }} className="p-2.5 text-white rounded-xl shadow-md">{icon}</div>
-        <div>
-          <h3 style={{ color: C.text }} className="font-bold uppercase tracking-tight text-sm">{title}</h3>
-          {sub && <p style={{ color: C.muted }} className="text-[9px] mt-0.5">{sub}</p>}
+  const renderHelpModal = () => {
+    const TABS = [
+      { id: 'workflow',  label: 'Workflow',      icon: <Zap size={13} /> },
+      { id: 'config',   label: 'Konfiguration', icon: <Settings size={13} /> },
+      { id: 'matrix',   label: 'Kurs-Matrix',   icon: <TableIcon size={13} /> },
+      { id: 'export',   label: 'Export',         icon: <FileDown size={13} /> },
+      { id: 'shortcuts',label: 'Shortcuts',      icon: <Keyboard size={13} /> },
+    ];
+    const HSection = ({ icon, title, children }) => (
+      <div className="mb-5">
+        <div className="flex items-center gap-2 mb-2.5">
+          <span style={{ color: C.main, backgroundColor: C.main + '18' }} className="p-1 rounded-md">{icon}</span>
+          <h4 style={{ color: C.text }} className="text-[11px] font-bold uppercase tracking-widest">{title}</h4>
         </div>
+        <div style={{ borderColor: C.border }} className="border-l-2 pl-4 space-y-2">{children}</div>
       </div>
-      <button onClick={onClose} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full transition-colors"><X size={20} /></button>
-    </div>
-  );
-
-  const renderHelpModal = () => (
-    <ModalShell zIndex={250}>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-6 md:p-8 border-b flex justify-between items-start shrink-0 relative overflow-hidden">
-        <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none"><Zap size={140} style={{ color: C.main }} /></div>
-        <div className="flex items-center gap-4 relative z-10">
-          <div style={{ backgroundColor: C.main }} className="p-3.5 text-white rounded-2xl shadow-lg"><BookOpen size={24} /></div>
-          <div>
-            <h3 style={{ color: C.text }} className="text-xl font-bold tracking-tight leading-none uppercase">Einfach erklärt</h3>
-            <p style={{ color: C.muted }} className="text-[10px] mt-1.5 font-semibold uppercase tracking-[0.2em]">Workflow für Mitarbeiter</p>
-          </div>
-        </div>
-        <button onClick={() => setActiveModal(null)} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full transition-all active:scale-90"><X size={24} /></button>
+    );
+    const Info = ({ children }) => <p style={{ color: C.muted }} className="text-xs leading-relaxed">{children}</p>;
+    const Row = ({ label, desc }) => (
+      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex gap-3 px-3 py-2.5 rounded-xl border">
+        <span style={{ color: C.text }} className="text-[11px] font-semibold w-32 shrink-0">{label}</span>
+        <span style={{ color: C.muted }} className="text-[11px]">{desc}</span>
       </div>
-      <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8">
-        <section>
-          <div className="flex items-center gap-2.5 mb-3">
-            <div style={{ color: C.main, backgroundColor: C.main + '15' }} className="p-1.5 rounded-lg"><Zap size={16} /></div>
-            <h4 style={{ color: C.text }} className="text-sm font-bold uppercase tracking-widest">Was macht dieses Programm?</h4>
-          </div>
-          <p style={{ color: C.muted, borderColor: C.border }} className="text-xs leading-relaxed pl-9 border-l-2">
-            Als EBCL-Mitarbeiter erstellst du mit diesem Tool hunderte Moodle-Zugänge für Partnerinstitute. Alle Einstellungen werden automatisch lokal gespeichert und sind beim nächsten Start sofort wieder verfügbar.
-          </p>
-        </section>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-[11px]">
-          {[
-            ['01', 'Einstellungen', 'Institutsnamen eingeben, Klassen, Trainer und Einschreibedauer definieren.'],
-            ['02', 'Kursverteilung', 'Kurse wählen und Klassen per Plus (+) zuweisen — oder "Alle zuweisen" nutzen.'],
-            ['03', 'Favoriten', 'Institut als Favorit speichern (⭐) für schnellen Zugriff beim nächsten Mal.'],
-            ['04', 'Ergebnis sichern', 'CSV: Import-Datei für Moodle.\nPDF: Querformat-Liste für das Institut.'],
-          ].map(([num, title, desc]) => (
-            <div key={num} className="flex gap-3 items-start">
-              <span style={{ color: C.accent1, backgroundColor: C.accent1 + '15' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px]">{num}</span>
-              <div><h5 style={{ color: C.text }} className="font-bold uppercase tracking-wider mb-1">{title}</h5><p style={{ color: C.muted }} className="whitespace-pre-line">{desc}</p></div>
-            </div>
-          ))}
-        </div>
-        {/* Shortcuts */}
-        <div>
-          <div className="flex items-center gap-2.5 mb-3">
-            <div style={{ color: C.accent1, backgroundColor: C.accent1 + '15' }} className="p-1.5 rounded-lg"><Keyboard size={16} /></div>
-            <h4 style={{ color: C.text }} className="text-sm font-bold uppercase tracking-widest">Tastaturkürzel</h4>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {SHORTCUTS.map((s, i) => (
-              <div key={i} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center justify-between px-3 py-2 rounded-xl border">
-                <span style={{ color: C.muted }} className="text-[11px]">{s.desc}</span>
-                <div className="flex items-center gap-1">
-                  {s.keys.map((k, j) => (
-                    <React.Fragment key={j}>
-                      <kbd style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="px-2 py-0.5 rounded-md border text-[10px] font-mono font-bold shadow-sm">{k}</kbd>
-                      {j < s.keys.length - 1 && <span style={{ color: C.muted }} className="text-[10px] mx-0.5">+</span>}
-                    </React.Fragment>
-                  ))}
-                </div>
+    );
+    return (
+      <ModalShell C={C} maxW="max-w-2xl" zIndex={250}>
+        {/* Header */}
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-6 pt-6 pb-0 border-b shrink-0">
+          <div className="flex justify-between items-center mb-4">
+            <div className="flex items-center gap-3">
+              <div style={{ backgroundColor: C.main }} className="p-2.5 text-white rounded-xl shadow-md"><BookOpen size={18} /></div>
+              <div>
+                <h3 style={{ color: C.text }} className="text-base font-bold uppercase tracking-tight">Hilfe & Dokumentation</h3>
+                <p style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-widest">EBCL-Moodle {appVersion}</p>
               </div>
+            </div>
+            <button onClick={() => setActiveModal(null)} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full transition-all"><X size={20} /></button>
+          </div>
+          {/* Tabs */}
+          <div className="flex gap-1">
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setHelpTab(t.id)}
+                style={helpTab === t.id
+                  ? { color: C.main, borderColor: C.main, backgroundColor: C.card }
+                  : { color: C.muted, borderColor: 'transparent', backgroundColor: 'transparent' }}
+                className="flex items-center gap-1.5 px-3 py-2 text-[10px] font-bold uppercase tracking-widest border-b-2 transition-all hover:opacity-80 rounded-t-lg">
+                {t.icon}{t.label}
+              </button>
             ))}
           </div>
         </div>
-      </div>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-6 border-t flex justify-end shrink-0">
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-10 py-3 rounded-2xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-xs">Alles klar!</button>
-      </div>
-    </ModalShell>
-  );
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+
+          {/* ── WORKFLOW ── */}
+          {helpTab === 'workflow' && (
+            <div>
+              <HSection icon={<Zap size={14} />} title="Was macht dieses Programm?">
+                <Info>EBCL-Moodle erstellt automatisch hunderte Moodle-Zugangsdaten für Partnerinstitute. Du konfigurierst einmal die Klassen- und Kursstruktur, generierst die Zugänge und exportierst sie — fertig.</Info>
+                <Info>Die Kursliste wird automatisch vom EBCL-Server geladen und lokal gecacht, sodass die App auch offline funktioniert.</Info>
+              </HSection>
+              <HSection icon={<Users size={14} />} title="Schritt-für-Schritt Workflow">
+                {[
+                  ['01', C.accent1, 'Institutsname eingeben', 'Den Namen des Partnerinstituts im Feld oben links eintragen. Pflichtfeld — ohne Namen kann nicht generiert werden.'],
+                  ['02', C.accent2, 'Klassen & Trainer definieren', 'Anzahl der Klassen pro Typ (15/20/30/40 Plätze) und Traineranzahl festlegen. Klassengrößen sind im Settings-Panel anpassbar.'],
+                  ['03', C.main,   'Kurse zuweisen', 'In der Kurs-Matrix die gewünschten Kurse pro Spalte auswählen und jeder Klasse zuweisen. "Alle zuweisen" (⌘A) belegt alle Klassen auf einmal.'],
+                  ['04', '#7C3AED','Liste generieren', 'Auf "Liste generieren" klicken (⌘G). Die App prüft ob alle Klassen mindestens einen Kurs haben — fehlende werden rot markiert.'],
+                  ['05', '#B45309','Exportieren', 'CSV (⌘E) für den Moodle-Import, PDF (⌘P) als Zugangsdaten-Blatt für das Institut. Beide Formate enthalten alle Accounts.'],
+                  ['06', '#059669','Favorit speichern', 'Das Institut per ⭐-Button als Favorit speichern. Beim nächsten Mal ist die komplette Konfiguration per Klick wiederhergestellt.'],
+                ].map(([n, col, title, desc]) => (
+                  <div key={n} className="flex gap-3 items-start">
+                    <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
+                    <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
+                  </div>
+                ))}
+              </HSection>
+              <HSection icon={<Info size={14} />} title="Was wird beim Neustart zurückgesetzt?">
+                <Info>Bei jedem App-Start wird alles auf Standard zurückgesetzt: Institutsname, Datum, Kursauswahl und Klassenzuweisungen. <strong style={{ color: C.text }}>Erhalten bleiben:</strong> Favoriten, Export-History, Klassengrößen, Klassen-Namen und Dark Mode.</Info>
+              </HSection>
+            </div>
+          )}
+
+          {/* ── KONFIGURATION ── */}
+          {helpTab === 'config' && (
+            <div className="space-y-1">
+              <HSection icon={<Building2 size={14} />} title="Organisation">
+                <Row label="Institutsname" desc="Pflichtfeld. Wird in Dateinamen, PDF-Header und als Präfix für alle Usernamen verwendet. (z.B. 'VHS Wien' → 'vhswien-student-001')" />
+                <Row label="Trainer" desc="Anzahl der Trainer-Accounts. Trainer erhalten Zugang zu allen aktiven Kursen und werden auf einer eigenen PDF-Seite aufgeführt." />
+                <Row label="Kurs Anzahl" desc="Wie viele Kursspalten in der Matrix angezeigt werden (max. 8). Entspricht der Anzahl der Moodle-Kurse, die belegt werden sollen." />
+              </HSection>
+              <HSection icon={<GraduationCap size={14} />} title="Klassen Struktur">
+                <Row label="Typen (15/20/30/40)" desc="Jeder Typ definiert eine Klassengröße. Über 'Anzahl' rechts bestimmst du, wie viele Klassen dieses Typs erstellt werden." />
+                <Row label="Klassengrößen" desc="Anpassbar in den Settings (⚙). Werden gespeichert und bleiben beim Neustart erhalten." />
+                <Row label="Klassen-Namen" desc="Optional in den Settings anpassbar (z.B. 'IT-Klasse A'). Standard: K-01, K-02, … Werden ebenfalls gespeichert." />
+              </HSection>
+              <HSection icon={<ShieldCheck size={14} />} title="Zeit & Sicherheit">
+                <Row label="Einschreibedatum" desc="Ab wann die Accounts aktiv sind. Wird immer auf das heutige Datum gesetzt — auch beim Laden eines Favoriten." />
+                <Row label="Dauer (Tage)" desc="Wie lange die Einschreibung gilt. Das Enddatum wird automatisch berechnet und ist direkt editierbar." />
+                <Row label="PW Schüler / Trainer" desc="Passwörter für generierte Accounts. Standard: '***ENTFERNT***' / '***ENTFERNT***'. Bei jedem Start auf Standard zurückgesetzt." />
+              </HSection>
+              <HSection icon={<Star size={14} />} title="Favoriten">
+                <Info>Ein Favorit speichert: Institutsname, alle Konfigurationsfelder und die komplette Kursmatrix. Beim Laden wird nur das Datum auf heute gesetzt.</Info>
+                <Info>Favoriten bleiben auch nach einem Neustart erhalten und können im Favoriten-Modal verwaltet (gelöscht) werden.</Info>
+              </HSection>
+            </div>
+          )}
+
+          {/* ── KURS-MATRIX ── */}
+          {helpTab === 'matrix' && (
+            <div>
+              <HSection icon={<BookOpen size={14} />} title="Kurs-Pool">
+                <Info>Die verfügbaren Kurse werden beim Start automatisch vom EBCL-Server geladen. Der zuletzt geladene Stand wird lokal gecacht — die App funktioniert damit auch offline.</Info>
+                <Row label="Kurse laden" desc="Über den 'Kurse laden'-Button in der Übersicht wird der Pool manuell neu synchronisiert (z.B. wenn neue Kurse hinzugekommen sind)." />
+                <Row label="Cache-Status" desc="In den Settings siehst du wie viele Kurse aktuell gecacht sind." />
+              </HSection>
+              <HSection icon={<TableIcon size={14} />} title="Matrix-Bedienung">
+                <Row label="Kurs auswählen" desc="Im Dropdown oben in jeder Spalte einen Kurs aus dem Pool wählen. Bis zu 8 Kurse gleichzeitig möglich (je nach 'Kurs Anzahl'-Einstellung)." />
+                <Row label="Zuweisung (Checkboxen)" desc="Für jede Klasse per Checkbox bestimmen, welche Kurse sie erhält. Eine Klasse kann mehrere Kurse haben." />
+                <Row label="Spalten-'Alle'-Button" desc="Der blaue 'Alle'-Button im Spaltenkopf weist alle Klassen diesem Kurs zu — oder entfernt alle wieder (Toggle)." />
+                <Row label="Alle zuweisen (⌘A)" desc="Weist alle Klassen allen aktiven Kursen zu. Schnellster Weg wenn alle Klassen die gleichen Kurse bekommen sollen." />
+              </HSection>
+              <HSection icon={<AlertTriangle size={14} />} title="Validierung">
+                <Info>Beim Klick auf "Liste generieren" prüft die App, ob jede Klasse mindestens einem aktiven Kurs zugewiesen ist. Klassen ohne Zuweisung werden <span style={{ color: '#e11d48' }}>rot markiert</span>. Die roten Markierungen verschwinden sobald eine Zuweisung gesetzt wird.</Info>
+              </HSection>
+            </div>
+          )}
+
+          {/* ── EXPORT ── */}
+          {helpTab === 'export' && (
+            <div>
+              <HSection icon={<FileSpreadsheet size={14} />} title="CSV-Export (⌘E)">
+                <Info>Die CSV-Datei ist das Moodle-Import-Format. Sie enthält alle generierten Accounts und Einschreibungen und kann direkt in Moodle hochgeladen werden.</Info>
+                <Row label="Inhalt" desc="Username, Passwort, Vorname, Nachname, E-Mail, Kurs-Shorthand, Kursgruppe, Rolle und Einschreibedauer pro Zeile." />
+                <Row label="Dateiname" desc="EBCL-Moodle-Upload-{Institut}-{Datum}.csv" />
+                <Row label="Kodierung" desc="UTF-8 mit BOM — für maximale Excel-Kompatibilität (Umlaute werden korrekt angezeigt)." />
+                <Row label="Verwendung" desc="In Moodle: Administration → Nutzer → Nutzer hochladen → CSV-Datei auswählen." />
+              </HSection>
+              <HSection icon={<FileDown size={14} />} title="PDF-Export (⌘P)">
+                <Info>Das PDF ist das Zugangsdaten-Dokument für das Institut. Es enthält pro Seite eine Klasse (oder die Trainer-Liste) mit allen Accounts im Tabellenformat.</Info>
+                <Row label="Format" desc="A4 Querformat (Landscape) — optimiert für viele Kursspalten nebeneinander." />
+                <Row label="Aufbau" desc="Seite 1 (optional): Trainer. Folgeseiten: Eine Seite pro Klasse mit Namen-Feld, Username, Passwort und allen zugewiesenen Kurslinks." />
+                <Row label="Kurslinks" desc="Kurs-Zellen im PDF sind klickbar — direkter Link zum jeweiligen Moodle-Kurs." />
+                <Row label="Dateiname" desc="EBCL-Zugangsdaten-{Institut}-{Datum}.pdf" />
+              </HSection>
+              <HSection icon={<ClipboardList size={14} />} title="Daten-Vorschau & History">
+                <Row label="Vorschau" desc="Nach dem Generieren zeigt 'Daten-Vorschau' alle Accounts in einer scrollbaren Tabelle — zur Kontrolle vor dem Export." />
+                <Row label="Export-History" desc="Jeder Export wird mit Zeitstempel, Dateiname und Accountanzahl in der History gespeichert (bleibt nach Neustart erhalten)." />
+              </HSection>
+            </div>
+          )}
+
+          {/* ── SHORTCUTS ── */}
+          {helpTab === 'shortcuts' && (
+            <div>
+              <HSection icon={<Keyboard size={14} />} title="Tastaturkürzel">
+                <div className="space-y-1.5">
+                  {SHORTCUTS.map((s, i) => (
+                    <div key={i} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center justify-between px-3 py-2.5 rounded-xl border">
+                      <span style={{ color: C.muted }} className="text-[11px]">{s.desc}</span>
+                      <div className="flex items-center gap-1">
+                        {s.keys.map((k, j) => (
+                          <React.Fragment key={j}>
+                            <kbd style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="px-2 py-0.5 rounded-md border text-[10px] font-mono font-bold shadow-sm">{k}</kbd>
+                            {j < s.keys.length - 1 && <span style={{ color: C.muted }} className="text-[10px] mx-0.5">+</span>}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </HSection>
+              <HSection icon={<Zap size={14} />} title="Tipps & Tricks">
+                <Row label="Offline arbeiten" desc="Der Kurs-Pool wird gecacht. Du kannst ohne Internet generieren und exportieren — solange der Cache vorhanden ist." />
+                <Row label="Favoriten nutzen" desc="Speichere häufig verwendete Institute als Favorit. Das Datum wird beim Laden automatisch auf heute gesetzt." />
+                <Row label="Alle zuweisen" desc="Bei gleicher Kursstruktur für alle Klassen: ⌘A spart alle Einzelklicks in der Matrix." />
+                <Row label="PDF direkt prüfen" desc="Daten-Vorschau (nach Generieren) zeigt alle Accounts bevor du exportierst — Tipp- oder Konfigurationsfehler früh erkennen." />
+                <Row label="Dark Mode" desc="Toggle in den Settings oder über den Mond/Sonne-Button in der Sidebar. Wird gespeichert." />
+                <Row label="Fenstergröße" desc="Das Fenster ist skalierbar. Die letzte Größe und Position wird beim nächsten Start automatisch wiederhergestellt." />
+              </HSection>
+              <HSection icon={<RefreshCw size={14} />} title="Updates">
+                <Info>Die App prüft beim Start automatisch ob eine neue Version verfügbar ist. Updates können direkt in den Settings installiert werden — kein manueller Download nötig.</Info>
+              </HSection>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex justify-between items-center shrink-0">
+          <div className="flex gap-1">
+            {TABS.map((t, i) => (
+              <button key={t.id} onClick={() => setHelpTab(TABS[i > 0 ? i - 1 : 0]?.id || t.id)}
+                style={{ color: helpTab === t.id ? C.main : C.muted }}
+                className="hidden" />
+            ))}
+            <span style={{ color: C.muted }} className="text-[10px]">
+              {TABS.findIndex(t => t.id === helpTab) + 1} / {TABS.length}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            {TABS.findIndex(t => t.id === helpTab) > 0 && (
+              <button onClick={() => setHelpTab(TABS[TABS.findIndex(t => t.id === helpTab) - 1].id)}
+                style={{ borderColor: C.border, color: C.muted, backgroundColor: C.card }}
+                className="px-4 py-2 rounded-xl border text-[10px] font-bold uppercase hover:opacity-80 transition-all">← Zurück</button>
+            )}
+            {TABS.findIndex(t => t.id === helpTab) < TABS.length - 1 ? (
+              <button onClick={() => setHelpTab(TABS[TABS.findIndex(t => t.id === helpTab) + 1].id)}
+                style={{ backgroundColor: C.accent1 }}
+                className="text-white px-6 py-2 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-[10px]">Weiter →</button>
+            ) : (
+              <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }}
+                className="text-white px-8 py-2 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-[10px]">Alles klar!</button>
+            )}
+          </div>
+        </div>
+      </ModalShell>
+    );
+  };
 
   const renderSettingsModal = () => (
-    <ModalShell maxW="max-w-lg">
-      <ModalHeader icon={<Settings size={18} />} title="System-Settings" onClose={() => setActiveModal(null)} />
+    <ModalShell C={C} maxW="max-w-lg">
+      <ModalHeader C={C} icon={<Settings size={18} />} title="System-Settings" onClose={() => setActiveModal(null)} />
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Darstellung */}
+        <div>
+          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3">{darkMode ? <Moon size={14} /> : <Sun size={14} />} Darstellung</h4>
+          <button onClick={() => setDarkMode(d => !d)} style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }} className="w-full flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm hover:opacity-80 transition-all">
+            <span className="text-[11px] font-semibold">{darkMode ? 'Dunkelmodus aktiv' : 'Hellmodus aktiv'}</span>
+            <span style={{ backgroundColor: darkMode ? C.main : C.accent1 }} className="flex items-center gap-1.5 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">
+              {darkMode ? <Sun size={11} /> : <Moon size={11} />} {darkMode ? 'Hell' : 'Dunkel'}
+            </span>
+          </button>
+        </div>
         {/* Klassengrößen */}
         <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><Users size={14} /> Klassengrößen</h4>
+          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Users size={14} /> Klassengrößen</h4>
+          <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
           <div className="grid grid-cols-2 gap-3">
             {config.classSizes.map((size, idx) => (
               <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1">Typ {idx + 1}</label>
+                <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1">Typ {idx + 1} — {size} Plätze</label>
                 <input type="number" min="0" value={size} onChange={e => updateClassSize(idx, e.target.value)} style={{ color: C.main }} className="w-full bg-transparent text-base font-bold outline-none" />
               </div>
             ))}
@@ -679,10 +916,10 @@ const App = () => {
         {/* Klassen-Namen */}
         <div>
           <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Edit3 size={14} /> Klassen-Namen <span className="normal-case font-normal opacity-60">(optional)</span></h4>
-          <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Leer lassen = Standard-Name (K-01, K-02, …)</p>
+          <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Leer lassen = Standard-Name (K-01, K-02, …). Wird gespeichert.</p>
           {classRows.length === 0
             ? <p style={{ color: C.muted }} className="text-[11px] italic">Erst Klassen im Konfigurations-Panel anlegen.</p>
-            : <div className="space-y-1.5">
+            : <div key={classNamesResetKey} className="space-y-1.5">
                 {classRows.map(row => (
                   <ClassNameRow key={row.id} row={row} savedValue={config.classNames?.[row.id - 1] || ''} onUpdate={updateClassName} C={C} />
                 ))}
@@ -719,8 +956,8 @@ const App = () => {
   );
 
   const renderFavoritesModal = () => (
-    <ModalShell maxW="max-w-lg">
-      <ModalHeader icon={<Star size={18} />} title="Favoriten" sub={`${favorites.length} gespeicherte Institute`} onClose={() => setActiveModal(null)} iconBg="#B45309" />
+    <ModalShell C={C} maxW="max-w-lg">
+      <ModalHeader C={C} icon={<Star size={18} />} title="Favoriten" sub={`${favorites.length} gespeicherte Institute`} onClose={() => setActiveModal(null)} iconBg="#B45309" />
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {favorites.length === 0 ? (
           <div className="py-12 text-center">
@@ -758,8 +995,8 @@ const App = () => {
   );
 
   const renderHistoryModal = () => (
-    <ModalShell maxW="max-w-3xl">
-      <ModalHeader icon={<History size={18} />} title="Export-History" sub={`${exportHistory.length} Exporte gesamt`} onClose={() => setActiveModal(null)} />
+    <ModalShell C={C} maxW="max-w-3xl">
+      <ModalHeader C={C} icon={<History size={18} />} title="Export-History" sub={`${exportHistory.length} Exporte gesamt`} onClose={() => setActiveModal(null)} />
       <div className="flex-1 overflow-auto">
         {exportHistory.length === 0 ? (
           <div className="py-12 text-center">
@@ -792,7 +1029,7 @@ const App = () => {
   );
 
   const renderCoursePreviewModal = () => (
-    <ModalShell maxW="max-w-4xl" zIndex={110}>
+    <ModalShell C={C} maxW="max-w-4xl" zIndex={110}>
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-b flex flex-wrap justify-between items-center gap-4 shrink-0">
         <div className="flex items-center gap-3">
           <div style={{ backgroundColor: C.accent1 }} className="p-2 text-white rounded-xl"><Eye size={18} /></div>
@@ -831,7 +1068,7 @@ const App = () => {
   );
 
   const renderDataPreviewModal = () => (
-    <ModalShell maxW="max-w-5xl" zIndex={110}>
+    <ModalShell C={C} maxW="max-w-5xl" zIndex={110}>
       <div className="p-6 bg-slate-800 border-b flex justify-between items-center shrink-0">
         <div className="flex items-center gap-3 text-white">
           <div style={{ backgroundColor: C.accent1 }} className="p-2.5 rounded-xl"><ClipboardList size={20} /></div>
@@ -961,10 +1198,19 @@ const App = () => {
               <Eye size={16} /> Kursübersicht
             </button>
 
-            <button disabled={isLoadingPool || !courseDictionary.length} onClick={generateList} style={{ backgroundColor: C.main }} className="w-full py-3 text-white rounded-xl font-bold shadow-md mt-3 transition-all hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 group text-sm">
+            <button
+              disabled={isLoadingPool || !courseDictionary.length || !config.institute?.trim() || !!isEnrolInvalid}
+              onClick={generateList}
+              style={{ backgroundColor: isEnrolInvalid ? '#B45309' : C.main }}
+              className="w-full py-3 text-white rounded-xl font-bold shadow-md mt-3 transition-all hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 group text-sm">
               <Users size={16} className="group-hover:scale-110 transition-transform" /> Liste generieren
               <kbd className="ml-1 opacity-40 text-[9px] font-mono">⌘G</kbd>
             </button>
+            {isEnrolInvalid && (
+              <p className="text-[10px] font-medium text-center mt-1.5 text-amber-600">
+                {isEnrolInvalid === 'dauer' ? '⚠ Dauer (Tage) muss größer 0 sein.' : '⚠ Einschreibezeitraum liegt in der Vergangenheit.'}
+              </p>
+            )}
 
             <button disabled={!isGenerated} onClick={() => setActiveModal('dataPreview')} style={{ color: C.accent1, borderColor: C.accent1 + '33' }} className="w-full py-2.5 bg-transparent border rounded-xl text-[10px] font-bold uppercase mt-3 hover:opacity-80 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5">
               <ClipboardList size={14} /> Daten-Vorschau
@@ -978,6 +1224,9 @@ const App = () => {
                 <FileSpreadsheet size={13} /> CSV <kbd className="opacity-40 font-mono text-[8px]">⌘E</kbd>
               </button>
             </div>
+            <button onClick={handleSessionReset} style={{ borderColor: C.border, color: C.muted }} className="w-full mt-3 py-2.5 border border-dashed rounded-xl text-[10px] font-bold uppercase tracking-widest hover:border-rose-400 hover:text-rose-500 hover:bg-rose-50/40 transition-all flex items-center justify-center gap-1.5">
+              <RefreshCw size={12} /> Neue Liste / Reset
+            </button>
           </section>
 
           {/* Workflow + Nav */}
@@ -1020,7 +1269,7 @@ const App = () => {
                   <div>
                     <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1 ml-1">Institutsname</label>
                     <div className="flex gap-1.5">
-                      <input name="institute" value={config.institute} onChange={handleInput} placeholder="z.B. Volkshochschule" style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium focus:ring-1 focus:border-blue-400 outline-none shadow-sm transition-all placeholder:opacity-30" />
+                      <input name="institute" value={config.institute} onChange={handleInput} placeholder="z.B. Volkshochschule" style={{ backgroundColor: C.card, borderColor: config.institute?.trim() ? C.border : '#ef4444', color: C.text }} className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium focus:ring-1 outline-none shadow-sm transition-all placeholder:opacity-30" />
                       <button
                         onClick={saveFavorite}
                         title="Als Favorit speichern"
@@ -1056,6 +1305,12 @@ const App = () => {
                     </div>
                   ))}
                 </div>
+                {totalStudents > 1000 && (
+                  <div style={{ backgroundColor: darkMode ? '#451a0320' : '#FEF3C7', borderColor: darkMode ? '#D97706' : '#FCD34D', color: darkMode ? '#FCD34D' : '#92400E' }} className="mt-2.5 flex items-start gap-2 border rounded-lg px-2.5 py-2 text-[10px] font-medium leading-snug">
+                    <AlertTriangle size={13} className="shrink-0 mt-px" style={{ color: '#D97706' }} />
+                    <span>CSV-Import von <strong>{totalStudents}</strong> Usern kann Moodle-Timeouts verursachen. In kleineren Chargen exportieren.</span>
+                  </div>
+                )}
               </div>
 
               {/* Zeit & Sicherheit */}
@@ -1075,11 +1330,31 @@ const App = () => {
                   <label style={{ color: C.main }} className="text-[8px] font-bold uppercase ml-1 flex justify-between"><span>Eingeschrieben bis</span><span className="opacity-70 font-medium">(Autom. berechnet)</span></label>
                   <input type="date" value={endDateDisplay} onChange={handleEndDateInput} style={{ color: C.main, borderColor: C.main + '40', backgroundColor: C.main + '08' }} className="w-full px-3 py-1.5 border rounded-lg text-xs font-bold outline-none shadow-sm focus:ring-1 focus:ring-red-200 transition-all" />
                 </div>
+                {/* Passwort-Modus Toggle */}
+                <div className="flex items-center justify-between mb-1.5">
+                  <span style={{ color: C.muted }} className="text-[8px] font-bold uppercase tracking-widest">Starkes Passwort</span>
+                  <button
+                    onClick={() => setConfig(p => ({ ...p, autoPassword: !p.autoPassword }))}
+                    style={{ backgroundColor: config.autoPassword ? C.accent2 : C.border }}
+                    className="relative flex items-center w-10 h-5 rounded-full transition-colors shrink-0">
+                    <span style={{ transform: config.autoPassword ? 'translateX(21px)' : 'translateX(2px)' }} className="absolute w-3.5 h-3.5 bg-white rounded-full shadow transition-transform" />
+                  </button>
+                </div>
+                <p style={{ color: C.muted }} className="text-[9px] mb-2 opacity-70 leading-snug">
+                  {config.autoPassword ? '⚡ Auto: Einzigartiges Passwort pro Account (Moodle-konform, min. 8 Zeichen)' : '— Vorgegeben: Gleiches Passwort für alle Accounts'}
+                </p>
                 <div className="grid grid-cols-2 gap-2">
                   {[{ label: 'PW Schüler', name: 'studentPwd' }, { label: 'PW Trainer', name: 'trainerPwd' }].map(f => (
-                    <div key={f.name} style={{ backgroundColor: C.card, borderColor: C.border }} className="p-2 rounded-lg border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <div key={f.name} style={{ backgroundColor: C.card, borderColor: C.border, opacity: config.autoPassword ? 0.45 : 1 }} className="p-2 rounded-lg border shadow-sm transition-opacity">
                       <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-0.5">{f.label}</label>
-                      <input name={f.name} value={config[f.name]} onChange={handleInput} style={{ color: C.text }} className="w-full bg-transparent text-[11px] font-mono font-medium outline-none" />
+                      <input
+                        name={f.name}
+                        value={config.autoPassword ? '' : config[f.name]}
+                        onChange={handleInput}
+                        disabled={config.autoPassword}
+                        placeholder={config.autoPassword ? 'Auto-generiert' : ''}
+                        style={{ color: C.text }}
+                        className="w-full bg-transparent text-[11px] font-mono font-medium outline-none disabled:cursor-not-allowed placeholder:opacity-60 placeholder:font-sans placeholder:not-italic" />
                     </div>
                   ))}
                 </div>
