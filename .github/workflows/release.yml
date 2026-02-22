@@ -16,27 +16,36 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: setup node
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          
+
       - name: install Rust
         uses: dtolnay/rust-toolchain@stable
-        
+
       - name: install dependencies
         run: npm install
-        
+
+      - name: Release Notes extrahieren
+        id: notes
+        run: |
+          node scripts/extract-notes.js
+          node -e "
+            const fs = require('fs');
+            const body = fs.readFileSync('release_body.txt', 'utf8');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'body<<NOTES_EOF\n' + body + '\nNOTES_EOF\n');
+          "
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # WICHTIG: Diese beiden Zeilen müssen exakt so unter env stehen!
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: "EBCL Moodle v__VERSION__"
-          # Empfehlung: Auf 'false' setzen, damit das Update sofort aktiv ist
-          releaseDraft: false 
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
           prerelease: false

@@ -180,6 +180,7 @@ const App = () => {
   const [isInstalling, setIsInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showSessionResetConfirm, setShowSessionResetConfirm] = useState(false);
   const [appVersion, setAppVersion] = useState('...');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
@@ -470,7 +471,6 @@ const App = () => {
   }, [addToast]);
 
   const handleSessionReset = useCallback(() => {
-    if (!window.confirm('Alle Daten wirklich löschen und neu starten?')) return;
     setConfig(p => ({
       ...p,
       institute: '',
@@ -573,6 +573,7 @@ const App = () => {
       const primary = [157, 32, 43];
       const fname = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.pdf`;
       const periodStr = `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`;
+      
       const renderHeader = (title, info) => {
         doc.setFontSize(20).setTextColor(...primary).setFont('helvetica', 'bold').text(config.institute.toUpperCase(), 15, 20);
         doc.setFontSize(12).setTextColor(60).setFont('helvetica', 'normal').text(title, 15, 28);
@@ -581,29 +582,69 @@ const App = () => {
         doc.setLineWidth(0.3).setDrawColor(0).line(15, 45, 282, 45);
         if (qrDataUrl) doc.addImage(qrDataUrl, 'PNG', 256, 4, 26, 26);
       };
-      // pageMap trackt welche Klasse auf welcher Seite ist (via didDrawPage-Hook)
+
       const pageMap = {};
+      
       const tOpts = (courses, sectionLabel) => ({
-        startY: 50, theme: 'grid', styles: { fontSize: 7, textColor: [0, 0, 0] },
+        startY: 50, 
+        theme: 'grid', 
+        styles: { fontSize: 7, textColor: [0, 0, 0] },
         headStyles: { fillColor: [40, 40, 40], textColor: 255 },
-        columnStyles: { 0: { cellWidth: 45 }, 1: { cellWidth: 35 }, 2: { cellWidth: 25 }, ...Object.fromEntries(courses.map((_, i) => [i + 3, { textColor: primary, fontStyle: 'bold' }])) },
-        didDrawCell: ({ cell, column, section }) => { if (section === 'body' && column.index >= 3 && courses[column.index - 3]?.url) doc.link(cell.x, cell.y, cell.width, cell.height, { url: courses[column.index - 3].url }); },
-        didDrawPage: () => { pageMap[doc.internal.getCurrentPageInfo().pageNumber] = sectionLabel; },
+        columnStyles: { 
+          0: { cellWidth: 45 }, 
+          1: { cellWidth: 35 }, 
+          2: { cellWidth: 25 }, 
+          ...Object.fromEntries(courses.map((_, i) => [i + 3, { textColor: primary, fontStyle: 'bold' }])) 
+        },
+        didDrawCell: (data) => {
+          const { cell, column, section, row } = data;
+          
+          // 1. Link-Logik für Kurse
+          if (section === 'body' && column.index >= 3 && courses[column.index - 3]?.url) {
+            doc.link(cell.x, cell.y, cell.width, cell.height, { url: courses[column.index - 3].url });
+          }
+
+          // 2. NEU: Formularfeld in der "Name"-Spalte (Index 0)
+          if (section === 'body' && column.index === 0) {
+            const textField = new doc.AcroFormTextField();
+            textField.fontSize = 7;
+            // Eindeutiger Name für das Feld (Kombination aus Seite und Zeile)
+            textField.fieldName = `name_${sectionLabel.replace(/[^a-z0-9]/gi, '_')}_${row.index}`;
+            // Position auf der Zelle (mit kleinem Padding)
+            textField.Rect = [cell.x + 1, cell.y + 1, cell.width - 2, cell.height - 2];
+            doc.addField(textField);
+          }
+        },
+        didDrawPage: () => { 
+          pageMap[doc.internal.getCurrentPageInfo().pageNumber] = sectionLabel; 
+        },
       });
+
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
-        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`), didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } });
+        autoTable(doc, { 
+          head: [['Name (hier tippen)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], 
+          body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), 
+          ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`), 
+          didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } 
+        });
       }
+
       [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id, idx) => {
         if (trainers.length || idx > 0) doc.addPage();
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
         renderHeader(`Teilnehmerliste: ${classLabel}`, `SCHÜLER: ${students.length}`);
-        autoTable(doc, { head: [['Name (Eingabefeld)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), ...tOpts(students[0].courses, `${classLabel} — ${config.institute}`) });
+        
+        autoTable(doc, { 
+          head: [['Name (hier tippen)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], 
+          body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), 
+          ...tOpts(students[0].courses, `${classLabel} — ${config.institute}`) 
+        });
       });
-      // Footer auf jeder Seite: Klasseninfo + Lernplattform + Zeitraum + Seitenzahl
+
       const pc = doc.internal.getNumberOfPages();
       for (let i = 1; i <= pc; i++) {
         doc.setPage(i);
@@ -619,10 +660,16 @@ const App = () => {
         doc.text(fname, 15, 201.5);
         doc.text(`Seite ${i} von ${pc}`, 282, 201.5, { align: 'right' });
       }
+
       doc.save(fname);
-      addExportEntry('PDF', fname); addToast('PDF exportiert.', 'success');
-    } catch (e) { console.error(e); addToast('PDF-Export fehlgeschlagen.', 'error'); }
-    finally { setIsExportingPDF(false); }
+      addExportEntry('PDF', fname); 
+      addToast('PDF exportiert (interaktiv).', 'success');
+    } catch (e) { 
+      console.error(e); 
+      addToast('PDF-Export fehlgeschlagen.', 'error'); 
+    } finally { 
+      setIsExportingPDF(false); 
+    }
   }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted, addToast, addExportEntry]);
 
   // ─── Shortcuts ────────────────────────────────────────────────────────────
@@ -1224,9 +1271,17 @@ const App = () => {
                 <FileSpreadsheet size={13} /> CSV <kbd className="opacity-40 font-mono text-[8px]">⌘E</kbd>
               </button>
             </div>
-            <button onClick={handleSessionReset} style={{ borderColor: C.border, color: C.muted }} className="w-full mt-3 py-2.5 border border-dashed rounded-xl text-[10px] font-bold uppercase tracking-widest hover:border-rose-400 hover:text-rose-500 hover:bg-rose-50/40 transition-all flex items-center justify-center gap-1.5">
-              <RefreshCw size={12} /> Neue Liste / Reset
-            </button>
+            {showSessionResetConfirm ? (
+              <div className="flex items-center gap-2 mt-3 w-full">
+                <span className="text-[10px] text-rose-600 font-bold flex-1">Wirklich zurücksetzen?</span>
+                <button onClick={() => { handleSessionReset(); setShowSessionResetConfirm(false); }} className="bg-rose-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-rose-600 transition-all">Ja</button>
+                <button onClick={() => setShowSessionResetConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="border text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-black/5 transition-all">Nein</button>
+              </div>
+            ) : (
+              <button onClick={() => setShowSessionResetConfirm(true)} style={{ borderColor: C.border, color: C.muted }} className="w-full mt-3 py-2.5 border border-dashed rounded-xl text-[10px] font-bold uppercase tracking-widest hover:border-rose-400 hover:text-rose-500 hover:bg-rose-50/40 transition-all flex items-center justify-center gap-1.5">
+                <RefreshCw size={12} /> Neue Liste / Reset
+              </button>
+            )}
           </section>
 
           {/* Workflow + Nav */}
