@@ -1,8 +1,11 @@
 # Release Notes
 
 ## Unreleased
-- PDF Spalte "Name" in Formfeld umgewandelt!
+
 ---
+
+## v0.4.1 - 2026-02-22
+- PDF Spalte "Name" in Formfeld umgewandelt!
 
 ## v0.3.0 - 2026-02-22
 - QR-Code-Anzeige für Schüler hinzugefügt
