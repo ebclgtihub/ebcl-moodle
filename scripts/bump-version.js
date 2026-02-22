@@ -53,21 +53,21 @@ if (unreleasedIdx !== -1) {
 
   const hasContent = unreleasedLines.some(l => l.trim() !== '' && l.trim() !== '---');
 
-  if (hasContent) {
-    // Trennlinie aus dem Unreleased-Block entfernen falls vorhanden
-    const filteredUnreleased = unreleasedLines.filter(l => l.trim() !== '---');
+  // Immer einen Versionsabschnitt erstellen — auch wenn Unreleased leer war
+  const filteredUnreleased = hasContent
+    ? unreleasedLines.filter(l => l.trim() !== '---')
+    : ['- Kein Changelog-Eintrag.'];
 
-    const newLines = [
-      ...lines.slice(0, unreleasedIdx + 1),
-      '',
-      '---',
-      '',
-      `## v${newVersion} - ${today}`,
-      ...filteredUnreleased,
-      ...(nextSectionIdx === -1 ? [] : lines.slice(nextSectionIdx)),
-    ];
-    writeFileSync('RELEASE_NOTES.md', newLines.join('\n'));
-  }
+  const newLines = [
+    ...lines.slice(0, unreleasedIdx + 1),
+    '',
+    '---',
+    '',
+    `## v${newVersion} - ${today}`,
+    ...filteredUnreleased,
+    ...(nextSectionIdx === -1 ? [] : lines.slice(nextSectionIdx)),
+  ];
+  writeFileSync('RELEASE_NOTES.md', newLines.join('\n'));
 }
 
 console.log(`Version: ${oldVersion} → ${newVersion}`);
