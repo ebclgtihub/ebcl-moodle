@@ -4,10 +4,10 @@
 
 ---
 
-## v0.4.7 - 2026-03-05
-- Kein Changelog-Eintrag.
-## v0.4.6 - 2026-03-05
-- Kein Changelog-Eintrag.
+## v0.4.8 - 2026-03-05
+- Besserer PDF Export 
+- Speicherung der Passworteinstellung
+
 ## v0.4.5 - 2026-02-22
 Test release 2.0
 

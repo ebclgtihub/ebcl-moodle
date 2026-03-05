@@ -675,11 +675,12 @@ const App = () => {
 
         // Hinweis-Box
         doc.setFillColor(255, 248, 230).setDrawColor(...primary).setLineWidth(0.4);
-        doc.roundedRect(col1, 172, 267, 12, 2, 2, 'FD');
-        doc.setFontSize(7.5).setFont('helvetica', 'bold').setTextColor(...primary);
-        doc.text('HINWEIS:', col1 + 4, 179);
+        doc.roundedRect(col1, 170, 267, 17, 2, 2, 'FD');
+        doc.setFontSize(6.5).setFont('helvetica', 'bold').setTextColor(...primary);
+        doc.text('HINWEIS:', col1 + 4, 175);
         doc.setFont('helvetica', 'normal').setTextColor(...bodyColor);
-        doc.text('Ihre persönlichen Zugangsdaten (Benutzername & Passwort) befinden sich auf der nächsten Seite dieses Dokuments.', col1 + 24, 179);
+        doc.text('•  Ihre persönlichen Zugangsdaten (Benutzername & Passwort) befinden sich auf der nächsten Seite dieses Dokuments.', col1 + 6, 180);
+        doc.text('•  Je nach PDF-Reader kann beim Kopieren von Benutzername oder Passwort ein überflüssiges Leerzeichen entstehen – bitte vor dem Anmelden prüfen!', col1 + 6, 185);
       }
 
       const tOpts = (courses, sectionLabel) => ({
