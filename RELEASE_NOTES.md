@@ -4,6 +4,8 @@
 
 ---
 
+## v0.4.7 - 2026-03-05
+- Kein Changelog-Eintrag.
 ## v0.4.6 - 2026-03-05
 - Kein Changelog-Eintrag.
 ## v0.4.5 - 2026-02-22

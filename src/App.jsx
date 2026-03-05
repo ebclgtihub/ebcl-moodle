@@ -421,7 +421,8 @@ const App = () => {
   const handleInput = useCallback(e => {
     const { name, value } = e.target;
     const isNum = ['enrolPeriod', 'trainerCount', 'courseSlotCount'].includes(name);
-    setConfig(p => ({ ...p, [name]: isNum ? Math.max(0, parseInt(value, 10) || 0) : value }));
+    const processed = name === 'institute' ? value.replace(/ /g, '_') : value;
+    setConfig(p => ({ ...p, [name]: isNum ? Math.max(0, parseInt(value, 10) || 0) : processed }));
   }, []);
   const handleEndDateInput = useCallback(e => {
     if (!e.target.value) return;
