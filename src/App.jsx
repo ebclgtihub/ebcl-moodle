@@ -297,6 +297,12 @@ const App = () => {
         if (sizes) setConfig(p => ({ ...p, classSizes: sizes }));
         const names = await store.get('classNames');
         if (names) setConfig(p => ({ ...p, classNames: names }));
+        const studentPwd = await store.get('studentPwd');
+        if (studentPwd) setConfig(p => ({ ...p, studentPwd }));
+        const trainerPwd = await store.get('trainerPwd');
+        if (trainerPwd) setConfig(p => ({ ...p, trainerPwd }));
+        const autoPassword = await store.get('autoPassword');
+        if (autoPassword !== null && autoPassword !== undefined) setConfig(p => ({ ...p, autoPassword }));
         const pool = await store.get('coursePool');
         if (pool?.length) setCourseDictionary(pool);
       } catch (e) {
@@ -323,6 +329,9 @@ const App = () => {
         await store.set('darkMode', darkMode);
         await store.set('classSizes', config.classSizes);
         await store.set('classNames', config.classNames);
+        await store.set('studentPwd', config.studentPwd);
+        await store.set('trainerPwd', config.trainerPwd);
+        await store.set('autoPassword', config.autoPassword);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -333,7 +342,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, isStoreLoaded]); // eslint-disable-line
+  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, isStoreLoaded]); // eslint-disable-line
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -584,17 +593,102 @@ const App = () => {
       };
 
       const pageMap = {};
-      
+
+      // ─── Leitfaden-Seite (Seite 1) ──────────────────────────────────────────
+      renderHeader('LEITFADEN FÜR TRAINER', `ZEITRAUM: ${periodStr}`);
+      pageMap[doc.internal.getCurrentPageInfo().pageNumber] = 'Leitfaden für Trainer';
+      {
+        const col1 = 15, col2 = 152;
+        const bodyColor = [50, 50, 50];
+        const drawSection = (num, title, lines, x, y0) => {
+          doc.setFontSize(9.5).setFont('helvetica', 'bold').setTextColor(...primary);
+          doc.text(`${num}   ${title}`, x, y0);
+          doc.setFontSize(7.5).setFont('helvetica', 'normal').setTextColor(...bodyColor);
+          let y = y0 + 6;
+          lines.forEach(([text, isUrl]) => {
+            if (text === '') { y += 3; return; }
+            if (isUrl) {
+              doc.setTextColor(37, 99, 235);
+              doc.text(text, x + 2, y);
+              doc.link(x + 2, y - 3, 65, 4, { url: text.trim() });
+              doc.setTextColor(...bodyColor);
+            } else {
+              doc.text(text, x + 2, y);
+            }
+            y += 5;
+          });
+        };
+
+        drawSection(1, 'ANMELDUNG AUF DER LERNPLATTFORM', [
+          ['Die EBCL-Lernplattform ist unter folgender Adresse erreichbar:'],
+          [''],
+          ['https://world.ebcl.eu/', true],
+          [''],
+          ['So melden Sie sich an:'],
+          ['  1.  Browser öffnen und https://world.ebcl.eu/ aufrufen'],
+          ['  2.  Oben rechts auf „Anmelden" klicken'],
+          ['  3.  Benutzername & Passwort eingeben'],
+          ['       (Zugangsdaten finden Sie auf der nächsten Seite)'],
+          ['  4.  Auf „Anmelden" klicken'],
+        ], col1, 53);
+
+        drawSection(2, 'MOODLE – MEINE KURSE', [
+          ['Nach der Anmeldung erscheint das Dashboard.'],
+          [''],
+          ['Unter „Meine Kurse" finden Sie alle zugewiesenen'],
+          ['Kurse. Klicken Sie auf einen Kurstitel, um Lern-'],
+          ['inhalte, Aufgaben und Aktivitäten einzusehen.'],
+          [''],
+          ['Navigation innerhalb eines Kurses:'],
+          ['  •  Linkes Menü: Alle Kursabschnitte'],
+          ['  •  Kursstartseite: Übersicht aller Aktivitäten'],
+          ['  •  Ankündigungen & Neuigkeiten im Newsforum'],
+        ], col1, 115);
+
+        drawSection(3, 'GRUPPEN & KLASSEN VERWALTEN', [
+          ['Ihre Schüler sind einer Gruppe (Klasse) zugewiesen.'],
+          [''],
+          ['Gruppenmitglieder einsehen:'],
+          ['  1.  Gewünschten Kurs öffnen'],
+          ['  2.  Im Kursmenü auf „Teilnehmer" klicken'],
+          ['  3.  Oben die Ansicht „Gruppen" auswählen'],
+          ['  4.  Auf eine Gruppe klicken'],
+        ], col2, 53);
+
+        drawSection(4, 'BEWERTUNGEN DER SCHÜLER EINSEHEN', [
+          ['So sehen Sie die Leistungen Ihrer Schüler:'],
+          [''],
+          ['  1.  Gewünschten Kurs öffnen'],
+          ['  2.  Im Kursmenü auf „Bewertungen" klicken'],
+          ['  3.  Bewertungsübersicht zeigt alle Aktivitäten'],
+          ['       und die erzielten Punkte der Schüler'],
+        ], col2, 100);
+
+        drawSection(5, 'SCHÜLER – PROFIL & NAME ÄNDERN', [
+          ['Schüler können ihren Namen selbst anpassen:'],
+          ['  1.  Oben rechts auf das Profilbild klicken'],
+          ['  2.  Im Dropdown „Profil" wählen'],
+          ['  3.  Links unter dem Namen auf "Profil bearbeiten" klicken'],
+          ['  4.  Vor- und Nachname eintragen, speichern'],
+        ], col2, 140);
+
+        // Hinweis-Box
+        doc.setFillColor(255, 248, 230).setDrawColor(...primary).setLineWidth(0.4);
+        doc.roundedRect(col1, 172, 267, 12, 2, 2, 'FD');
+        doc.setFontSize(7.5).setFont('helvetica', 'bold').setTextColor(...primary);
+        doc.text('HINWEIS:', col1 + 4, 179);
+        doc.setFont('helvetica', 'normal').setTextColor(...bodyColor);
+        doc.text('Ihre persönlichen Zugangsdaten (Benutzername & Passwort) befinden sich auf der nächsten Seite dieses Dokuments.', col1 + 24, 179);
+      }
+
       const tOpts = (courses, sectionLabel) => ({
         startY: 50, 
         theme: 'grid', 
-        styles: { fontSize: 7, textColor: [0, 0, 0] },
+        styles: { fontSize: 7, textColor: [0, 0, 0], cellWidth: 'wrap' },
         headStyles: { fillColor: [40, 40, 40], textColor: 255 },
-        columnStyles: { 
-          0: { cellWidth: 45 }, 
-          1: { cellWidth: 35 }, 
-          2: { cellWidth: 25 }, 
-          ...Object.fromEntries(courses.map((_, i) => [i + 3, { textColor: primary, fontStyle: 'bold' }])) 
+        columnStyles: {
+          0: { cellWidth: 40 },
+          ...Object.fromEntries(courses.map((_, i) => [i + 3, { cellWidth: 'wrap', textColor: primary, fontStyle: 'bold' }]))
         },
         didDrawCell: (data) => {
           const { cell, column, section, row } = data;
@@ -622,6 +716,7 @@ const App = () => {
 
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
+        doc.addPage();
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
         autoTable(doc, { 
           head: [['Name (hier tippen)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], 
@@ -631,8 +726,8 @@ const App = () => {
         });
       }
 
-      [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id, idx) => {
-        if (trainers.length || idx > 0) doc.addPage();
+      [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id) => {
+        doc.addPage();
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
