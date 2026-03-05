@@ -45,6 +45,7 @@ const DEFAULT_CONFIG = {
   studentPwd: '***ENTFERNT***',
   trainerPwd: '***ENTFERNT***',
   autoPassword: false,
+  showLeitfaden: true,
   enrolPeriod: 31,
   enrolDate: new Date().toISOString().split('T')[0],
   classSizes: [15, 20, 30, 40],
@@ -303,6 +304,8 @@ const App = () => {
         if (trainerPwd) setConfig(p => ({ ...p, trainerPwd }));
         const autoPassword = await store.get('autoPassword');
         if (autoPassword !== null && autoPassword !== undefined) setConfig(p => ({ ...p, autoPassword }));
+        const showLeitfaden = await store.get('showLeitfaden');
+        if (showLeitfaden !== null && showLeitfaden !== undefined) setConfig(p => ({ ...p, showLeitfaden }));
         const pool = await store.get('coursePool');
         if (pool?.length) setCourseDictionary(pool);
       } catch (e) {
@@ -332,6 +335,7 @@ const App = () => {
         await store.set('studentPwd', config.studentPwd);
         await store.set('trainerPwd', config.trainerPwd);
         await store.set('autoPassword', config.autoPassword);
+        await store.set('showLeitfaden', config.showLeitfaden);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -342,7 +346,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, isStoreLoaded]); // eslint-disable-line
+  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, isStoreLoaded]); // eslint-disable-line
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -595,7 +599,9 @@ const App = () => {
 
       const pageMap = {};
 
-      // ─── Leitfaden-Seite (Seite 1) ──────────────────────────────────────────
+      // ─── Leitfaden-Seite (Seite 1, optional) ───────────────────────────────
+      let firstDataPage = !config.showLeitfaden; // true = erste Datenseite nutzt Seite 1
+      if (config.showLeitfaden) {
       renderHeader('LEITFADEN FÜR TRAINER', `ZEITRAUM: ${periodStr}`);
       pageMap[doc.internal.getCurrentPageInfo().pageNumber] = 'Leitfaden für Trainer';
       {
@@ -682,6 +688,7 @@ const App = () => {
         doc.text('•  Ihre persönlichen Zugangsdaten (Benutzername & Passwort) befinden sich auf der nächsten Seite dieses Dokuments.', col1 + 6, 180);
         doc.text('•  Je nach PDF-Reader kann beim Kopieren von Benutzername oder Passwort ein überflüssiges Leerzeichen entstehen – bitte vor dem Anmelden prüfen!', col1 + 6, 185);
       }
+      } // end if showLeitfaden
 
       const tOpts = (courses, sectionLabel) => ({
         startY: 50, 
@@ -718,18 +725,18 @@ const App = () => {
 
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
-        doc.addPage();
+        if (!firstDataPage) doc.addPage(); else firstDataPage = false;
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
-        autoTable(doc, { 
-          head: [['Name (hier tippen)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]], 
-          body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]), 
-          ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`), 
-          didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; } 
+        autoTable(doc, {
+          head: [['Name (hier tippen)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]],
+          body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]),
+          ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`),
+          didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; }
         });
       }
 
       [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id) => {
-        doc.addPage();
+        if (!firstDataPage) doc.addPage(); else firstDataPage = false;
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
@@ -1069,6 +1076,22 @@ const App = () => {
                 ))}
               </div>
           }
+        </div>
+        {/* Leitfaden */}
+        <div>
+          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><FileDown size={14} /> PDF-Export</h4>
+          <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm">
+            <div>
+              <span style={{ color: C.text }} className="text-[11px] font-semibold">Leitfaden (Seite 1)</span>
+              <p style={{ color: C.muted }} className="text-[10px] mt-0.5 opacity-70">Trainer-Anleitung als erste PDF-Seite ein-/ausblenden</p>
+            </div>
+            <button
+              onClick={() => setConfig(p => ({ ...p, showLeitfaden: !p.showLeitfaden }))}
+              style={{ backgroundColor: config.showLeitfaden ? C.accent2 : C.border }}
+              className="relative flex items-center w-10 h-5 rounded-full transition-colors shrink-0 ml-4">
+              <span style={{ transform: config.showLeitfaden ? 'translateX(21px)' : 'translateX(2px)' }} className="absolute w-3.5 h-3.5 bg-white rounded-full shadow transition-transform" />
+            </button>
+          </div>
         </div>
         {/* Update */}
         <div>

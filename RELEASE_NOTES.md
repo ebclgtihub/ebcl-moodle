@@ -4,6 +4,8 @@
 
 ---
 
+## v0.5.0 - 2026-03-05
+- Kein Changelog-Eintrag.
 ## v0.4.8 - 2026-03-05
 - Besserer PDF Export 
 - Speicherung der Passworteinstellung
