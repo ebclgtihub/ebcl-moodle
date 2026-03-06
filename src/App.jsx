@@ -592,8 +592,9 @@ const App = () => {
         doc.setFontSize(20).setTextColor(...primary).setFont('helvetica', 'bold').text(config.institute.toUpperCase(), 15, 20);
         doc.setFontSize(12).setTextColor(60).setFont('helvetica', 'normal').text(title, 15, 28);
         doc.setFontSize(10).setTextColor(37, 99, 235).text('Lernplattform: https://world.ebcl.eu/', 15, 34).link(15, 31, 65, 4, { url: 'https://world.ebcl.eu/' });
-        doc.setFontSize(8).setTextColor(120).text(`ZEITRAUM: ${periodStr} | ${info}`, 15, 42);
-        doc.setLineWidth(0.3).setDrawColor(0).line(15, 45, 282, 45);
+        doc.setFontSize(6.5).setTextColor(130).setFont('helvetica', 'italic').text('Hinweis: Es kann beim Kopieren der Zugangsdaten zu einer Fehlermeldung kommen. Dann bitte diese händisch eintippen.', 15, 39);
+        doc.setFontSize(8).setTextColor(120).setFont('helvetica', 'normal').text(`ZEITRAUM: ${periodStr} | ${info}`, 15, 44);
+        doc.setLineWidth(0.3).setDrawColor(0).line(15, 47, 282, 47);
         if (qrDataUrl) doc.addImage(qrDataUrl, 'PNG', 256, 4, 26, 26);
       };
 
