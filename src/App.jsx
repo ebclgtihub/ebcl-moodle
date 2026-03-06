@@ -729,7 +729,7 @@ const App = () => {
         if (!firstDataPage) doc.addPage(); else firstDataPage = false;
         renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
         autoTable(doc, {
-          head: [['Name (hier tippen)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]],
+          head: [['Name (fakultativ)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]],
           body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]),
           ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`),
           didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; }

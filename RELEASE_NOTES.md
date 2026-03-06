@@ -4,6 +4,8 @@
 
 ---
 
+## v0.5.2 - 2026-03-06
+- Kein Changelog-Eintrag.
 ## v0.5.1 - 2026-03-06
 - Kein Changelog-Eintrag.
 ## v0.5.0 - 2026-03-05
