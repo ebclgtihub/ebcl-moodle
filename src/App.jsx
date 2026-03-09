@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { uploadToSharePoint } from './sharepoint';
+import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
+import { enrollInMoodle } from './moodle';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
@@ -12,7 +13,7 @@ import {
   Eye, X, RefreshCw, Info, Settings, HelpCircle, BookOpen,
   Zap, ClipboardList, ShieldCheck, GraduationCap, FileDown,
   Save, Wifi, WifiOff, Star, StarOff, Trash2, History,
-  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload
+  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload, EyeOff
 } from 'lucide-react';
 
 /**
@@ -58,6 +59,9 @@ const DEFAULT_CONFIG = {
   selectedPoolCourseIds: Array(8).fill('none'),
   courseApiUrl: '***ENTFERNT***',
   sharepointUrl: '***ENTFERNT***',
+  moodleUrl: '',
+  moodleToken: '',
+  moodleEnabled: false,
 };
 
 
@@ -173,6 +177,9 @@ const App = () => {
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isUploadingSP, setIsUploadingSP] = useState(false);
+  const [isMoodleEnrolling, setIsMoodleEnrolling] = useState(false);
+  const [showMoodleToken, setShowMoodleToken] = useState(false);
+  const [showMoodleConfirm, setShowMoodleConfirm] = useState(false);
   const [isStoreLoaded, setIsStoreLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -313,6 +320,12 @@ const App = () => {
         if (showLeitfaden !== null && showLeitfaden !== undefined) setConfig(p => ({ ...p, showLeitfaden }));
         const pool = await store.get('coursePool');
         if (pool?.length) setCourseDictionary(pool);
+        const moodleUrl = await store.get('moodleUrl');
+        if (moodleUrl) setConfig(p => ({ ...p, moodleUrl }));
+        const moodleToken = await store.get('moodleToken');
+        if (moodleToken) setConfig(p => ({ ...p, moodleToken }));
+        const moodleEnabled = await store.get('moodleEnabled');
+        if (moodleEnabled !== null && moodleEnabled !== undefined) setConfig(p => ({ ...p, moodleEnabled }));
       } catch (e) {
         console.error('Store laden:', e);
         addToast('Einstellungen konnten nicht geladen werden.', 'error');
@@ -341,6 +354,9 @@ const App = () => {
         await store.set('trainerPwd', config.trainerPwd);
         await store.set('autoPassword', config.autoPassword);
         await store.set('showLeitfaden', config.showLeitfaden);
+        await store.set('moodleUrl', config.moodleUrl);
+        await store.set('moodleToken', config.moodleToken);
+        await store.set('moodleEnabled', config.moodleEnabled);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -351,7 +367,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, isStoreLoaded]); // eslint-disable-line
+  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.moodleEnabled, isStoreLoaded]); // eslint-disable-line
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -922,6 +938,84 @@ const App = () => {
     }
   }, [config.institute, buildCsvBlob, downloadPDF, downloadExcel, addToast]);
 
+  // ─── Moodle Einschreibung ──────────────────────────────────────────────────
+  const handleMoodleEnrol = useCallback(async () => {
+    setIsMoodleEnrolling(true);
+    try {
+      const result = await enrollInMoodle({
+        baseUrl: config.moodleUrl,
+        token: config.moodleToken,
+        generatedData,
+        activeMatrixCourses,
+        classRows,
+        config,
+        getClassLabel,
+      });
+
+      result.warnings.forEach(w => addToast(w, 'info'));
+      addToast(
+        `Moodle: ${result.usersResolved} User, ${result.enrolmentsDone} Einschreibungen, ${result.groupsCreated} Gruppen`,
+        'success',
+        8000
+      );
+      addExportEntry('Moodle', `Moodle-Einschreibung`);
+
+      // ── SharePoint Upload: TXT-Zusammenfassung + PDF + Excel ───────────────
+      if (config.sharepointUrl) {
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0];
+        const instClean = config.institute.replace(/\s+/g, '_');
+        const folderName = `${instClean}_${dateStr}_Moodle`;
+
+        // TXT-Zusammenfassung aufbauen
+        const lines = [
+          `EBCL Moodle-Einschreibung – Zusammenfassung`,
+          `==========================================`,
+          `Institut:        ${config.institute}`,
+          `Datum:           ${fmtDateTime(now)}`,
+          `Moodle-URL:      ${config.moodleUrl}`,
+          ``,
+          `Ergebnis`,
+          `--------`,
+          `User aufgelöst:   ${result.usersResolved}`,
+          `Neu angelegt:     ${result.usersCreated}`,
+          `Einschreibungen:  ${result.enrolmentsDone}`,
+          `Gruppen:          ${result.groupsCreated}`,
+          ``,
+          ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
+          `Accounts`,
+          `--------`,
+          ...generatedData.map(u =>
+            `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
+          ),
+        ];
+        const txtBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+        const txtName = `EBCL-Moodle-Import-${instClean}-${dateStr}.txt`;
+        const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
+        const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
+
+        const [pdfBlob, xlsxBlob] = await Promise.all([
+          downloadPDF({ returnBlob: true }),
+          downloadExcel({ returnBlob: true }),
+        ]);
+
+        if (pdfBlob && xlsxBlob) {
+          const ok = await uploadMoodleResultToSharePoint(
+            txtBlob, pdfBlob, xlsxBlob,
+            folderName, txtName, pdfName, xlsxName,
+            config.sharepointUrl
+          );
+          if (ok) addToast(`SharePoint: Ordner „${folderName}" erstellt.`, 'success');
+          else addToast('SharePoint-Upload fehlgeschlagen.', 'error');
+        }
+      }
+    } catch (e) {
+      addToast(`Moodle-Fehler: ${e.message}`, 'error', 0);
+    } finally {
+      setIsMoodleEnrolling(false);
+    }
+  }, [config, generatedData, activeMatrixCourses, classRows, getClassLabel, addToast, addExportEntry, downloadPDF, downloadExcel]);
+
   // ─── Shortcuts ────────────────────────────────────────────────────────────
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
   useEffect(() => {
@@ -1285,6 +1379,46 @@ const App = () => {
                 ))}
               </div>
             </div>
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-1">
+                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                  <GraduationCap size={14} /> Moodle REST API
+                </h4>
+                <button
+                  onClick={() => setConfig(p => ({ ...p, moodleEnabled: !p.moodleEnabled }))}
+                  style={{ backgroundColor: config.moodleEnabled ? '#7C3AED' : C.border }}
+                  className="relative w-9 h-5 rounded-full transition-colors duration-200 shrink-0"
+                >
+                  <span style={{ transform: config.moodleEnabled ? 'translateX(16px)' : 'translateX(2px)' }} className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 block" />
+                </button>
+              </div>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Direktes Einschreiben via Moodle Web Services (experimentell). Token benötigt Berechtigungen für: core_user_create_users, enrol_manual_enrol_users, core_group_create_groups u.a.</p>
+              {config.moodleEnabled && (
+                <div className="space-y-3">
+                  <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">Moodle URL</label>
+                    <input type="text" value={config.moodleUrl}
+                      onChange={e => setConfig(p => ({ ...p, moodleUrl: e.target.value }))}
+                      placeholder="https://moodle.schule.at"
+                      style={{ color: C.text, backgroundColor: 'transparent' }}
+                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                  </div>
+                  <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">API-Token</label>
+                      <button onClick={() => setShowMoodleToken(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
+                        {showMoodleToken ? <EyeOff size={12} /> : <Eye size={12} />}
+                      </button>
+                    </div>
+                    <input type={showMoodleToken ? 'text' : 'password'} value={config.moodleToken}
+                      onChange={e => setConfig(p => ({ ...p, moodleToken: e.target.value }))}
+                      placeholder="abc123def456…"
+                      style={{ color: C.text, backgroundColor: 'transparent' }}
+                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                  </div>
+                </div>
+              )}
+            </div>
           </>}
         </div>
         <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
@@ -1446,20 +1580,37 @@ const App = () => {
           </tbody>
         </table>
       </div>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-end gap-3">
-        <button disabled={isExportingPDF} onClick={downloadPDF} style={{ backgroundColor: C.accent1 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
-          {isExportingPDF ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />} PDF
-        </button>
-        <button disabled={isExportingExcel} onClick={downloadExcel} style={{ backgroundColor: '#217346' }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
-          {isExportingExcel ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Excel
-        </button>
-        <button onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs">
-          <FileSpreadsheet size={14} /> CSV
-        </button>
-        <button disabled={isUploadingSP || isExportingPDF} onClick={handleSharePointUpload} style={{ backgroundColor: '#0078d4' }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
-          {isUploadingSP ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} SharePoint
-        </button>
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm text-xs">Schließen</button>
+      {showMoodleConfirm && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm z-[300]">
+          <div style={{ backgroundColor: C.card, borderColor: C.border }} className="rounded-2xl shadow-2xl border p-6 max-w-sm w-full mx-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2.5 rounded-xl text-white" style={{ backgroundColor: '#7C3AED' }}><GraduationCap size={18} /></div>
+              <h3 style={{ color: C.text }} className="font-bold text-sm uppercase tracking-tight">Moodle einschreiben?</h3>
+            </div>
+            <p style={{ color: C.muted }} className="text-xs mb-1">Es werden <strong style={{ color: C.text }}>{generatedData.length} Accounts</strong> direkt in Moodle angelegt und eingeschrieben.</p>
+            <p style={{ color: C.muted }} className="text-xs mb-5 opacity-70">Bereits bestehende User werden wiederverwendet. Dieser Vorgang kann nicht automatisch rückgängig gemacht werden.</p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setShowMoodleConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="border px-4 py-2 rounded-xl text-xs font-bold uppercase hover:bg-black/5 transition-all">Abbrechen</button>
+              <button onClick={() => { setShowMoodleConfirm(false); handleMoodleEnrol(); }} style={{ backgroundColor: '#7C3AED' }} className="text-white px-5 py-2 rounded-xl text-xs font-bold uppercase hover:brightness-110 active:scale-95 transition-all flex items-center gap-2">
+                <GraduationCap size={13} /> Bestätigen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex gap-2">
+        {[
+          { disabled: isExportingPDF, onClick: downloadPDF, bg: C.accent1, icon: isExportingPDF ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />, label: 'PDF' },
+          { disabled: isExportingExcel, onClick: downloadExcel, bg: '#217346', icon: isExportingExcel ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />, label: 'Excel' },
+          { disabled: false, onClick: downloadCSV, bg: C.accent2, icon: <FileSpreadsheet size={14} />, label: 'CSV' },
+          { disabled: isUploadingSP || isExportingPDF, onClick: handleSharePointUpload, bg: '#0078d4', icon: isUploadingSP ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />, label: 'SharePoint' },
+          ...(config.moodleEnabled ? [{ disabled: isMoodleEnrolling || !config.moodleUrl || !config.moodleToken, onClick: () => setShowMoodleConfirm(true), bg: '#7C3AED', icon: isMoodleEnrolling ? <Loader2 size={14} className="animate-spin" /> : <GraduationCap size={14} />, label: isMoodleEnrolling ? 'Läuft…' : 'Moodle' }] : []),
+        ].map(btn => (
+          <button key={btn.label} disabled={btn.disabled} onClick={btn.onClick} style={{ backgroundColor: btn.bg }} className="flex-1 py-2.5 text-white rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center justify-center gap-1.5 text-xs disabled:opacity-50">
+            {btn.icon} {btn.label}
+          </button>
+        ))}
+        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="flex-1 py-2.5 text-white rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm text-xs">Schließen</button>
       </div>
     </ModalShell>
   );
@@ -1583,6 +1734,18 @@ const App = () => {
               <button disabled={!isGenerated} onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-2">
                 <FileSpreadsheet size={13} /> CSV <kbd className="opacity-40 font-mono text-[8px]">⌘E</kbd>
               </button>
+              {config.moodleEnabled && (
+                <button
+                  disabled={!isGenerated || isMoodleEnrolling || !config.moodleUrl || !config.moodleToken}
+                  onClick={() => setShowMoodleConfirm(true)}
+                  style={{ backgroundColor: '#7C3AED' }}
+                  className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-2"
+                  title={!config.moodleUrl || !config.moodleToken ? 'Moodle-URL und Token in Einstellungen → Backend konfigurieren' : 'Direkt in Moodle einschreiben'}
+                >
+                  {isMoodleEnrolling ? <Loader2 size={13} className="animate-spin" /> : <GraduationCap size={13} />}
+                  {isMoodleEnrolling ? 'Einschreiben…' : 'Moodle einschreiben'}
+                </button>
+              )}
             </div>
             {showSessionResetConfirm ? (
               <div className="flex items-center gap-2 mt-3 w-full">
