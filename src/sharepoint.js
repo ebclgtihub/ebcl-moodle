@@ -9,17 +9,18 @@ const toBase64Clean = (blob) => new Promise((resolve, reject) => {
   reader.readAsDataURL(blob);
 });
 
-export const uploadToSharePoint = async (csvBlob, pdfBlob, folderName, csvName, pdfName, flowUrl) => {
+export const uploadToSharePoint = async (csvBlob, pdfBlob, xlsxBlob, folderName, csvName, pdfName, xlsxName, flowUrl) => {
   try {
-    const [csvContent, pdfContent] = await Promise.all([
+    const [csvContent, pdfContent, xlsxContent] = await Promise.all([
       toBase64Clean(csvBlob),
       toBase64Clean(pdfBlob),
+      xlsxBlob ? toBase64Clean(xlsxBlob) : Promise.resolve(''),
     ]);
 
     const response = await fetch(flowUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folderName, csvName, pdfName, csvContent, pdfContent }),
+      body: JSON.stringify({ folderName, csvName, pdfName, xlsxName, csvContent, pdfContent, xlsxContent }),
     });
 
     if (response.ok) {

@@ -3,6 +3,7 @@ import { uploadToSharePoint } from './sharepoint';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
+import * as XLSX from 'xlsx';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import {
@@ -170,6 +171,7 @@ const App = () => {
   const [generatedData, setGeneratedData] = useState([]);
   const [isGenerated, setIsGenerated] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isUploadingSP, setIsUploadingSP] = useState(false);
   const [isStoreLoaded, setIsStoreLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
@@ -588,6 +590,113 @@ const App = () => {
     addExportEntry('CSV', fname); addToast('CSV heruntergeladen.', 'success');
   }, [buildCsvBlob, config.institute, addToast, addExportEntry]);
 
+  // ─── Excel ────────────────────────────────────────────────────────────────
+  const buildExcelBlob = useCallback(() => {
+    if (!generatedData.length) return null;
+    const wb = XLSX.utils.book_new();
+    const periodStr = `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`;
+    const trainers = generatedData.filter(d => d.isT);
+    const classIds = [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort();
+    // Hyperlink zu einer bereits befüllten Zelle hinzufügen
+    const addLink = (ws, r, c, url) => {
+      if (!url) return;
+      const ref = XLSX.utils.encode_cell({ r, c });
+      if (ws[ref]) ws[ref].l = { Target: url };
+    };
+
+    // ─── Sheet 1: Übersicht ───
+    const loginUrl = 'https://world.ebcl.eu/';
+    const overviewRows = [
+      ['EBCL Zugangsdaten – Übersicht'],
+      ['Institut:', config.institute],
+      ['Datum:', new Date().toLocaleDateString('de-DE')],
+      ['Freischaltzeitraum:', periodStr],
+      ['Gesamt-Accounts:', generatedData.length],
+      ['Zugang:', loginUrl],
+      [],
+      ['Gruppe', 'Typ', 'Anzahl Accounts', 'Kurse'],
+    ];
+    if (trainers.length) {
+      overviewRows.push(['Trainer', 'Trainer', trainers.length, activeMatrixCourses.map(c => c.label).join(', ')]);
+    }
+    classIds.forEach(id => {
+      const students = generatedData.filter(d => d.cNum === id);
+      const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
+      const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
+      overviewRows.push([classLabel, 'Schüler', students.length, students[0]?.courses.map(c => c.label).join(', ') || '']);
+    });
+    const wsOverview = XLSX.utils.aoa_to_sheet(overviewRows);
+    addLink(wsOverview, 5, 1, loginUrl); // Zeile "Zugang:" → URL klickbar
+    wsOverview['!cols'] = [{ wch: 25 }, { wch: 30 }, { wch: 16 }, { wch: 50 }];
+    XLSX.utils.book_append_sheet(wb, wsOverview, 'Übersicht');
+
+    // Hilfsfunktion: Sheet aus Accounts bauen (Trainer + Klassen gleich strukturiert)
+    const buildAccountSheet = (accounts, courses) => {
+      const header = ['Name', 'Username', 'Passwort', ...courses.map((_, i) => `Kurs ${i + 1}`)];
+      const dataRows = accounts.map(a => ['', a.user, a.pw, ...a.courses.map(c => c.label)]);
+      const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+      accounts.forEach((a, ri) => {
+        a.courses.forEach((c, ci) => { if (c.url) addLink(ws, ri + 1, 3 + ci, c.url); });
+      });
+      ws['!cols'] = [{ wch: 20 }, { wch: 32 }, { wch: 16 }, ...courses.map(() => ({ wch: 22 }))];
+      return ws;
+    };
+
+    // ─── Sheet: Trainer ───
+    if (trainers.length) {
+      const wsT = buildAccountSheet(trainers, activeMatrixCourses);
+      XLSX.utils.book_append_sheet(wb, wsT, 'Trainer');
+    }
+
+    // ─── Sheet per class ───
+    classIds.forEach(id => {
+      const students = generatedData.filter(d => d.cNum === id);
+      const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
+      const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
+      const courses = students[0]?.courses || [];
+      const ws = buildAccountSheet(students, courses);
+      const sheetName = classLabel.replace(/[\\\/\?\*\[\]:]/g, '').substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    });
+
+    const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    return new Blob([new Uint8Array(buffer)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted]);
+
+  const downloadExcel = useCallback(async ({ returnBlob = false } = {}) => {
+    const blob = buildExcelBlob();
+    if (!blob) return returnBlob ? null : undefined;
+    if (returnBlob) return blob;
+
+    setIsExportingExcel(true);
+    try {
+      const fname = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.xlsx`;
+      // WebKit (Tauri/macOS) behandelt binary Blob-URLs als Navigation statt Download —
+      // über FileReader zu Data-URL konvertieren, damit der Download korrekt ausgelöst wird.
+      await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const a = document.createElement('a');
+          a.href = reader.result;
+          a.download = fname;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          resolve();
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      addExportEntry('XLSX', fname);
+      addToast('Excel heruntergeladen.', 'success');
+    } catch (e) {
+      console.error(e);
+      addToast('Excel-Export fehlgeschlagen.', 'error');
+    } finally {
+      setIsExportingExcel(false);
+    }
+  }, [buildExcelBlob, config.institute, addToast, addExportEntry]);
+
   // ─── PDF ──────────────────────────────────────────────────────────────────
   const downloadPDF = useCallback(async ({ returnBlob = false } = {}) => {
     if (!returnBlob) setIsExportingPDF(true);
@@ -798,10 +907,11 @@ const App = () => {
       const folderName = `${instClean}_${dateStr}`;
       const csvName = `EBCL-Moodle-Upload-${instClean}-${dateStr}.csv`;
       const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
+      const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
       const csvBlob = buildCsvBlob();
-      const pdfBlob = await downloadPDF({ returnBlob: true });
-      if (!csvBlob || !pdfBlob) return addToast('Daten fehlen für Upload.', 'error');
-      const ok = await uploadToSharePoint(csvBlob, pdfBlob, folderName, csvName, pdfName, config.sharepointUrl);
+      const [pdfBlob, xlsxBlob] = await Promise.all([downloadPDF({ returnBlob: true }), downloadExcel({ returnBlob: true })]);
+      if (!csvBlob || !pdfBlob || !xlsxBlob) return addToast('Daten fehlen für Upload.', 'error');
+      const ok = await uploadToSharePoint(csvBlob, pdfBlob, xlsxBlob, folderName, csvName, pdfName, xlsxName, config.sharepointUrl);
       if (ok) addToast(`SharePoint: Ordner „${folderName}" erstellt.`, 'success');
       else addToast('SharePoint Upload fehlgeschlagen.', 'error');
     } catch (e) {
@@ -810,7 +920,7 @@ const App = () => {
     } finally {
       setIsUploadingSP(false);
     }
-  }, [config.institute, buildCsvBlob, downloadPDF, addToast]);
+  }, [config.institute, buildCsvBlob, downloadPDF, downloadExcel, addToast]);
 
   // ─── Shortcuts ────────────────────────────────────────────────────────────
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
@@ -1252,7 +1362,7 @@ const App = () => {
             <tbody>
               {exportHistory.map(e => (
                 <tr key={e.id} style={{ borderColor: C.border }} className="border-b hover:bg-black/5 transition-colors">
-                  <td className="px-4 py-3 whitespace-nowrap"><span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${e.type === 'PDF' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>{e.type}</span></td>
+                  <td className="px-4 py-3 whitespace-nowrap"><span className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${e.type === 'PDF' ? 'bg-blue-100 text-blue-700' : e.type === 'XLSX' ? 'bg-green-100 text-green-700' : 'bg-emerald-100 text-emerald-700'}`}>{e.type}</span></td>
                   <td style={{ color: C.text }} className="px-4 py-3 font-semibold whitespace-nowrap">{e.institute}</td>
                   <td style={{ color: C.muted }} className="px-4 py-3 whitespace-nowrap"><span style={{ color: C.text }} className="font-bold">{e.accounts}</span> · {e.trainers}T/{e.students}S</td>
                   <td style={{ color: C.muted }} className="px-4 py-3 tabular-nums whitespace-nowrap">{fmtDateTime(new Date(e.date))}</td>
@@ -1339,6 +1449,9 @@ const App = () => {
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-end gap-3">
         <button disabled={isExportingPDF} onClick={downloadPDF} style={{ backgroundColor: C.accent1 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
           {isExportingPDF ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />} PDF
+        </button>
+        <button disabled={isExportingExcel} onClick={downloadExcel} style={{ backgroundColor: '#217346' }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
+          {isExportingExcel ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Excel
         </button>
         <button onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs">
           <FileSpreadsheet size={14} /> CSV
@@ -1464,7 +1577,10 @@ const App = () => {
               <button disabled={!isGenerated || isExportingPDF} onClick={downloadPDF} style={{ backgroundColor: C.accent1 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
                 {isExportingPDF ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} PDF <kbd className="opacity-40 font-mono text-[8px]">⌘P</kbd>
               </button>
-              <button disabled={!isGenerated} onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
+              <button disabled={!isGenerated || isExportingExcel} onClick={downloadExcel} style={{ backgroundColor: '#217346' }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
+                {isExportingExcel ? <Loader2 size={13} className="animate-spin" /> : <FileSpreadsheet size={13} />} Excel
+              </button>
+              <button disabled={!isGenerated} onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-2">
                 <FileSpreadsheet size={13} /> CSV <kbd className="opacity-40 font-mono text-[8px]">⌘E</kbd>
               </button>
             </div>

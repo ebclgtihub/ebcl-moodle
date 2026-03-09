@@ -4,6 +4,10 @@
 
 ---
 
+## v0.7.0 - 2026-03-09
+- Feat: Excel Export!
+
+
 ## v0.6.0 - 2026-03-09
 - Neue Funktionen: 
     -SharePoint Export
