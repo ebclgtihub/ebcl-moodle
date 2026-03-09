@@ -4,8 +4,10 @@
 
 ---
 
-## v0.8.0 - 2026-03-09
-- Kein Changelog-Eintrag.
+## v0.9.0 - 2026-03-09
+- feat: direct moodle upload
+
+
 ## v0.7.0 - 2026-03-09
 - Feat: Excel Export!
 
