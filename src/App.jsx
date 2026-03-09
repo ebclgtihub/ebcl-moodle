@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { uploadToSharePoint } from './sharepoint';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
@@ -10,7 +11,7 @@ import {
   Eye, X, RefreshCw, Info, Settings, HelpCircle, BookOpen,
   Zap, ClipboardList, ShieldCheck, GraduationCap, FileDown,
   Save, Wifi, WifiOff, Star, StarOff, Trash2, History,
-  Moon, Sun, Keyboard, CheckSquare, Square, Edit3
+  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload
 } from 'lucide-react';
 
 /**
@@ -52,12 +53,12 @@ const DEFAULT_CONFIG = {
   classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
   classNames: {},
   trainerCount: 2,
-  courseSlotCount: 4,
+  courseSlotCount: 1,
   selectedPoolCourseIds: Array(8).fill('none'),
+  courseApiUrl: '***ENTFERNT***',
+  sharepointUrl: '***ENTFERNT***',
 };
 
-const COURSE_API_URL =
-  '***ENTFERNT***';
 
 const SHORTCUTS = [
   { keys: ['⌘/Ctrl', 'G'], desc: 'Liste generieren' },
@@ -169,6 +170,7 @@ const App = () => {
   const [generatedData, setGeneratedData] = useState([]);
   const [isGenerated, setIsGenerated] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isUploadingSP, setIsUploadingSP] = useState(false);
   const [isStoreLoaded, setIsStoreLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -181,6 +183,7 @@ const App = () => {
   const [isInstalling, setIsInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState(0);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('allgemein');
   const [showSessionResetConfirm, setShowSessionResetConfirm] = useState(false);
   const [appVersion, setAppVersion] = useState('...');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -352,7 +355,7 @@ const App = () => {
   const fetchCoursePool = useCallback(async () => {
     setIsLoadingPool(true);
     try {
-      const r = await fetch(COURSE_API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request: 'get_courses' }) });
+      const r = await fetch(config.courseApiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request: 'get_courses' }) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const raw = await r.json();
       const items = Array.isArray(raw) ? raw : Array.isArray(raw?.value) ? raw.value : [];
@@ -425,7 +428,8 @@ const App = () => {
   const handleInput = useCallback(e => {
     const { name, value } = e.target;
     const isNum = ['enrolPeriod', 'trainerCount', 'courseSlotCount'].includes(name);
-    const processed = name === 'institute' ? value.replace(/ /g, '_') : value;
+    const isPwd = ['studentPwd', 'trainerPwd'].includes(name);
+    const processed = name === 'institute' ? value.replace(/ /g, '_') : isPwd ? value.trim() : value;
     setConfig(p => ({ ...p, [name]: isNum ? Math.max(0, parseInt(value, 10) || 0) : processed }));
   }, []);
   const handleEndDateInput = useCallback(e => {
@@ -556,8 +560,8 @@ const App = () => {
   }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast]);
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
-  const downloadCSV = useCallback(() => {
-    if (!generatedData.length) return;
+  const buildCsvBlob = useCallback(() => {
+    if (!generatedData.length) return null;
     const rows = generatedData.map(r => {
       const enrols = [];
       if (r.isT) activeMatrixCourses.forEach(c => classRows.forEach(cls => enrols.push({ shorthand: c.shorthand, group: `${config.institute}-${getClassLabel(cls)}`, role: 4, period: config.enrolPeriod })));
@@ -572,15 +576,21 @@ const App = () => {
       for (let i = 0; i < maxC; i++) { const e = r.enrols[i]; line.push(e ? esc(e.shorthand) : '""', e ? esc(e.group) : '""', e ? esc(e.role) : '""', e ? esc(e.period) : '""'); }
       return line.join(',');
     });
+    return new Blob(['\uFEFF', headers.join(',') + '\r\n' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  }, [generatedData, activeMatrixCourses, classRows, config, getClassLabel]);
+
+  const downloadCSV = useCallback(() => {
+    const blob = buildCsvBlob();
+    if (!blob) return;
     const fname = `EBCL-Moodle-Upload-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.csv`;
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob(['\uFEFF', headers.join(',') + '\r\n' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' })), download: fname });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: fname });
     a.click(); URL.revokeObjectURL(a.href);
     addExportEntry('CSV', fname); addToast('CSV heruntergeladen.', 'success');
-  }, [generatedData, activeMatrixCourses, classRows, config, getClassLabel, addToast, addExportEntry]);
+  }, [buildCsvBlob, config.institute, addToast, addExportEntry]);
 
   // ─── PDF ──────────────────────────────────────────────────────────────────
-  const downloadPDF = useCallback(async () => {
-    setIsExportingPDF(true);
+  const downloadPDF = useCallback(async ({ returnBlob = false } = {}) => {
+    if (!returnBlob) setIsExportingPDF(true);
     try {
       const qrDataUrl = await getQrDataUrl().catch(() => null);
       const doc = new jsPDF('l', 'mm', 'a4');
@@ -591,9 +601,9 @@ const App = () => {
       const renderHeader = (title, info) => {
         doc.setFontSize(20).setTextColor(...primary).setFont('helvetica', 'bold').text(config.institute.toUpperCase(), 15, 20);
         doc.setFontSize(12).setTextColor(60).setFont('helvetica', 'normal').text(title, 15, 28);
-        doc.setFontSize(10).setTextColor(37, 99, 235).text('Lernplattform: https://world.ebcl.eu/', 15, 34).link(15, 31, 65, 4, { url: 'https://world.ebcl.eu/' });
+        doc.setFontSize(10).setTextColor(37, 99, 235).text('Zugang: https://world.ebcl.eu/', 15, 34).link(15, 31, 65, 4, { url: 'https://world.ebcl.eu/' });
         doc.setFontSize(6.5).setTextColor(130).setFont('helvetica', 'italic').text('Hinweis: Es kann beim Kopieren der Zugangsdaten zu einer Fehlermeldung kommen. Dann bitte diese händisch eintippen.', 15, 39);
-        doc.setFontSize(8).setTextColor(120).setFont('helvetica', 'normal').text(`ZEITRAUM: ${periodStr} | ${info}`, 15, 44);
+        doc.setFontSize(8).setTextColor(120).setFont('helvetica', 'normal').text(`FREISCHALTZEITRAUM: ${periodStr} | ${info}`, 15, 44);
         doc.setLineWidth(0.3).setDrawColor(0).line(15, 47, 282, 47);
         if (qrDataUrl) doc.addImage(qrDataUrl, 'PNG', 256, 4, 26, 26);
       };
@@ -603,7 +613,7 @@ const App = () => {
       // ─── Leitfaden-Seite (Seite 1, optional) ───────────────────────────────
       let firstDataPage = !config.showLeitfaden; // true = erste Datenseite nutzt Seite 1
       if (config.showLeitfaden) {
-      renderHeader('LEITFADEN FÜR TRAINER', `ZEITRAUM: ${periodStr}`);
+      renderHeader('LEITFADEN FÜR TRAINER', `FREISCHALTZEITRAUM: ${periodStr}`);
       pageMap[doc.internal.getCurrentPageInfo().pageNumber] = 'Leitfaden für Trainer';
       {
         const col1 = 15, col2 = 152;
@@ -727,7 +737,7 @@ const App = () => {
       const trainers = generatedData.filter(d => d.isT);
       if (trainers.length) {
         if (!firstDataPage) doc.addPage(); else firstDataPage = false;
-        renderHeader('Zugangsdaten: Trainer', `TRAINER: ${trainers.length}`);
+        renderHeader('Zugangsdaten: Trainer', `ANZAHL: ${trainers.length}`);
         autoTable(doc, {
           head: [['Name (fakultativ)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]],
           body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]),
@@ -741,10 +751,10 @@ const App = () => {
         const students = generatedData.filter(d => d.cNum === id);
         const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
-        renderHeader(`Teilnehmerliste: ${classLabel}`, `SCHÜLER: ${students.length}`);
+        renderHeader(classLabel, `ANZAHL: ${students.length}`);
         
         autoTable(doc, { 
-          head: [['Name (hier tippen)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], 
+          head: [['Name (faktualtiv)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], 
           body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), 
           ...tOpts(students[0].courses, `${classLabel} — ${config.institute}`) 
         });
@@ -760,22 +770,47 @@ const App = () => {
         doc.setTextColor(37, 99, 235);
         doc.text('world.ebcl.eu', 148.5, 197, { align: 'center' });
         doc.setTextColor(100);
-        doc.text(`Zeitraum: ${periodStr}`, 282, 197, { align: 'right' });
+        doc.text(`Freischaltungszeitraum: ${periodStr}`, 282, 197, { align: 'right' });
         doc.setFontSize(6).setTextColor(160);
         doc.text(fname, 15, 201.5);
         doc.text(`Seite ${i} von ${pc}`, 282, 201.5, { align: 'right' });
       }
 
+      if (returnBlob) return doc.output('blob');
       doc.save(fname);
-      addExportEntry('PDF', fname); 
+      addExportEntry('PDF', fname);
       addToast('PDF exportiert (interaktiv).', 'success');
-    } catch (e) { 
-      console.error(e); 
-      addToast('PDF-Export fehlgeschlagen.', 'error'); 
-    } finally { 
-      setIsExportingPDF(false); 
+    } catch (e) {
+      console.error(e);
+      if (!returnBlob) addToast('PDF-Export fehlgeschlagen.', 'error');
+      throw e;
+    } finally {
+      if (!returnBlob) setIsExportingPDF(false);
     }
   }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted, addToast, addExportEntry]);
+
+  // ─── SharePoint ───────────────────────────────────────────────────────────
+  const handleSharePointUpload = useCallback(async () => {
+    setIsUploadingSP(true);
+    try {
+      const dateStr = new Date().toISOString().split('T')[0];
+      const instClean = config.institute.replace(/\s+/g, '_');
+      const folderName = `${instClean}_${dateStr}`;
+      const csvName = `EBCL-Moodle-Upload-${instClean}-${dateStr}.csv`;
+      const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
+      const csvBlob = buildCsvBlob();
+      const pdfBlob = await downloadPDF({ returnBlob: true });
+      if (!csvBlob || !pdfBlob) return addToast('Daten fehlen für Upload.', 'error');
+      const ok = await uploadToSharePoint(csvBlob, pdfBlob, folderName, csvName, pdfName, config.sharepointUrl);
+      if (ok) addToast(`SharePoint: Ordner „${folderName}" erstellt.`, 'success');
+      else addToast('SharePoint Upload fehlgeschlagen.', 'error');
+    } catch (e) {
+      console.error(e);
+      addToast('SharePoint Upload fehlgeschlagen.', 'error');
+    } finally {
+      setIsUploadingSP(false);
+    }
+  }, [config.institute, buildCsvBlob, downloadPDF, addToast]);
 
   // ─── Shortcuts ────────────────────────────────────────────────────────────
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
@@ -1038,90 +1073,128 @@ const App = () => {
     );
   };
 
-  const renderSettingsModal = () => (
-    <ModalShell C={C} maxW="max-w-lg">
-      <ModalHeader C={C} icon={<Settings size={18} />} title="System-Settings" onClose={() => setActiveModal(null)} />
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {/* Darstellung */}
-        <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3">{darkMode ? <Moon size={14} /> : <Sun size={14} />} Darstellung</h4>
-          <button onClick={() => setDarkMode(d => !d)} style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }} className="w-full flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm hover:opacity-80 transition-all">
-            <span className="text-[11px] font-semibold">{darkMode ? 'Dunkelmodus aktiv' : 'Hellmodus aktiv'}</span>
-            <span style={{ backgroundColor: darkMode ? C.main : C.accent1 }} className="flex items-center gap-1.5 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">
-              {darkMode ? <Sun size={11} /> : <Moon size={11} />} {darkMode ? 'Hell' : 'Dunkel'}
-            </span>
-          </button>
+  const renderSettingsModal = () => {
+    const STABS = [
+      { id: 'allgemein', label: 'Allgemein', icon: <Settings size={12} /> },
+      { id: 'klassen',   label: 'Klassen',   icon: <GraduationCap size={12} /> },
+      { id: 'backend',   label: 'Backend',   icon: <Upload size={12} /> },
+    ];
+    return (
+      <ModalShell C={C} maxW="max-w-lg">
+        <ModalHeader C={C} icon={<Settings size={18} />} title="System-Settings" onClose={() => setActiveModal(null)} />
+        {/* Tab-Bar */}
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex gap-1 px-4 py-2 border-b shrink-0">
+          {STABS.map(t => (
+            <button key={t.id} onClick={() => setSettingsTab(t.id)}
+              style={{ backgroundColor: settingsTab === t.id ? C.card : 'transparent', color: settingsTab === t.id ? C.text : C.muted, borderColor: settingsTab === t.id ? C.border : 'transparent' }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase transition-all">
+              {t.icon}{t.label}
+            </button>
+          ))}
         </div>
-        {/* Klassengrößen */}
-        <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Users size={14} /> Klassengrößen</h4>
-          <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
-          <div className="grid grid-cols-2 gap-3">
-            {config.classSizes.map((size, idx) => (
-              <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1">Typ {idx + 1} — {size} Plätze</label>
-                <input type="number" min="0" value={size} onChange={e => updateClassSize(idx, e.target.value)} style={{ color: C.main }} className="w-full bg-transparent text-base font-bold outline-none" />
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          {/* ── Allgemein ─────────────────────────────────────────── */}
+          {settingsTab === 'allgemein' && <>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3">{darkMode ? <Moon size={14} /> : <Sun size={14} />} Darstellung</h4>
+              <button onClick={() => setDarkMode(d => !d)} style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }} className="w-full flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm hover:opacity-80 transition-all">
+                <span className="text-[11px] font-semibold">{darkMode ? 'Dunkelmodus aktiv' : 'Hellmodus aktiv'}</span>
+                <span style={{ backgroundColor: darkMode ? C.main : C.accent1 }} className="flex items-center gap-1.5 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg">
+                  {darkMode ? <Sun size={11} /> : <Moon size={11} />} {darkMode ? 'Hell' : 'Dunkel'}
+                </span>
+              </button>
+            </div>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><FileDown size={14} /> PDF-Export</h4>
+              <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm">
+                <div>
+                  <span style={{ color: C.text }} className="text-[11px] font-semibold">Leitfaden (Seite 1)</span>
+                  <p style={{ color: C.muted }} className="text-[10px] mt-0.5 opacity-70">Trainer-Anleitung als erste PDF-Seite ein-/ausblenden</p>
+                </div>
+                <button onClick={() => setConfig(p => ({ ...p, showLeitfaden: !p.showLeitfaden }))}
+                  style={{ backgroundColor: config.showLeitfaden ? C.accent2 : C.border }}
+                  className="relative flex items-center w-10 h-5 rounded-full transition-colors shrink-0 ml-4">
+                  <span style={{ transform: config.showLeitfaden ? 'translateX(21px)' : 'translateX(2px)' }} className="absolute w-3.5 h-3.5 bg-white rounded-full shadow transition-transform" />
+                </button>
               </div>
-            ))}
-          </div>
-        </div>
-        {/* Klassen-Namen */}
-        <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Edit3 size={14} /> Klassen-Namen <span className="normal-case font-normal opacity-60">(optional)</span></h4>
-          <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Leer lassen = Standard-Name (K-01, K-02, …). Wird gespeichert.</p>
-          {classRows.length === 0
-            ? <p style={{ color: C.muted }} className="text-[11px] italic">Erst Klassen im Konfigurations-Panel anlegen.</p>
-            : <div key={classNamesResetKey} className="space-y-1.5">
-                {classRows.map(row => (
-                  <ClassNameRow key={row.id} row={row} savedValue={config.classNames?.[row.id - 1] || ''} onUpdate={updateClassName} C={C} />
+            </div>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><RefreshCw size={14} /> Software-Update</h4>
+              <button onClick={handleManualUpdateCheck} disabled={isCheckingUpdate || !!pendingUpdate}
+                style={{ borderColor: C.border, color: pendingUpdate ? C.accent2 : C.text, backgroundColor: C.card }}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-xl text-[11px] font-bold hover:opacity-80 disabled:opacity-50 transition-all">
+                {isCheckingUpdate ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                {isCheckingUpdate ? 'Suche nach Updates…' : pendingUpdate ? `Update v${pendingUpdate.version} verfügbar` : 'Jetzt auf Updates prüfen'}
+              </button>
+            </div>
+          </>}
+          {/* ── Klassen ───────────────────────────────────────────── */}
+          {settingsTab === 'klassen' && <>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Users size={14} /> Klassengrößen</h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
+              <div className="grid grid-cols-2 gap-3">
+                {config.classSizes.map((size, idx) => (
+                  <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1">Typ {idx + 1} — {size} Plätze</label>
+                    <input type="number" min="0" value={size} onChange={e => updateClassSize(idx, e.target.value)} style={{ color: C.main }} className="w-full bg-transparent text-base font-bold outline-none" />
+                  </div>
                 ))}
               </div>
-          }
-        </div>
-        {/* Leitfaden */}
-        <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><FileDown size={14} /> PDF-Export</h4>
-          <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center justify-between px-4 py-3 rounded-xl border shadow-sm">
+            </div>
             <div>
-              <span style={{ color: C.text }} className="text-[11px] font-semibold">Leitfaden (Seite 1)</span>
-              <p style={{ color: C.muted }} className="text-[10px] mt-0.5 opacity-70">Trainer-Anleitung als erste PDF-Seite ein-/ausblenden</p>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Edit3 size={14} /> Klassen-Namen <span className="normal-case font-normal opacity-60">(optional)</span></h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Leer lassen = Standard-Name (K-01, K-02, …). Wird gespeichert.</p>
+              {classRows.length === 0
+                ? <p style={{ color: C.muted }} className="text-[11px] italic">Erst Klassen im Konfigurations-Panel anlegen.</p>
+                : <div key={classNamesResetKey} className="space-y-1.5">
+                    {classRows.map(row => (
+                      <ClassNameRow key={row.id} row={row} savedValue={config.classNames?.[row.id - 1] || ''} onUpdate={updateClassName} C={C} />
+                    ))}
+                  </div>
+              }
             </div>
-            <button
-              onClick={() => setConfig(p => ({ ...p, showLeitfaden: !p.showLeitfaden }))}
-              style={{ backgroundColor: config.showLeitfaden ? C.accent2 : C.border }}
-              className="relative flex items-center w-10 h-5 rounded-full transition-colors shrink-0 ml-4">
-              <span style={{ transform: config.showLeitfaden ? 'translateX(21px)' : 'translateX(2px)' }} className="absolute w-3.5 h-3.5 bg-white rounded-full shadow transition-transform" />
-            </button>
+          </>}
+          {/* ── Backend ───────────────────────────────────────────── */}
+          {settingsTab === 'backend' && <>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Upload size={14} /> Power Automate URLs</h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
+              <div className="space-y-3">
+                {[
+                  { label: 'Kursliste', name: 'courseApiUrl' },
+                  { label: 'SharePoint Export', name: 'sharepointUrl' },
+                ].map(f => (
+                  <div key={f.name} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
+                    <input type="text" value={config[f.name]}
+                      onChange={e => setConfig(p => ({ ...p, [f.name]: e.target.value }))}
+                      style={{ color: C.text, backgroundColor: 'transparent' }}
+                      className="w-full text-[10px] font-mono outline-none" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>}
+        </div>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
+          <div className="flex items-center gap-3">
+            <button onClick={handleSettingsReset} className="text-amber-600 hover:text-amber-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-amber-50 px-3 py-2 rounded-lg transition-all"><RefreshCw size={12} /> Zurücksetzen</button>
+            {showDeleteConfirm ? (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-rose-600 font-bold">Wirklich alles löschen?</span>
+                <button onClick={handleFullReset} className="bg-rose-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-rose-600 transition-all">Ja</button>
+                <button onClick={() => setShowDeleteConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="border text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-black/5 transition-all">Nein</button>
+              </div>
+            ) : (
+              <button onClick={() => setShowDeleteConfirm(true)} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all"><Trash2 size={12} /> Alle Daten löschen</button>
+            )}
           </div>
+          <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-xs">Schließen</button>
         </div>
-        {/* Update */}
-        <div>
-          <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-3"><RefreshCw size={14} /> Software-Update</h4>
-          <button onClick={handleManualUpdateCheck} disabled={isCheckingUpdate || !!pendingUpdate}
-            style={{ borderColor: C.border, color: pendingUpdate ? C.accent2 : C.text, backgroundColor: C.card }}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border rounded-xl text-[11px] font-bold hover:opacity-80 disabled:opacity-50 transition-all">
-            {isCheckingUpdate ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            {isCheckingUpdate ? 'Suche nach Updates…' : pendingUpdate ? `Update v${pendingUpdate.version} verfügbar` : 'Jetzt auf Updates prüfen'}
-          </button>
-        </div>
-      </div>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
-        <div className="flex items-center gap-3">
-          <button onClick={handleSettingsReset} className="text-amber-600 hover:text-amber-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-amber-50 px-3 py-2 rounded-lg transition-all"><RefreshCw size={12} /> Zurücksetzen</button>
-          {showDeleteConfirm ? (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-rose-600 font-bold">Wirklich alles löschen?</span>
-              <button onClick={handleFullReset} className="bg-rose-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-rose-600 transition-all">Ja</button>
-              <button onClick={() => setShowDeleteConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="border text-[10px] font-bold px-2.5 py-1 rounded-lg hover:bg-black/5 transition-all">Nein</button>
-            </div>
-          ) : (
-            <button onClick={() => setShowDeleteConfirm(true)} className="text-rose-500 hover:text-rose-700 text-[10px] font-bold uppercase flex items-center gap-1.5 hover:bg-rose-50 px-3 py-2 rounded-lg transition-all"><Trash2 size={12} /> Alle Daten löschen</button>
-          )}
-        </div>
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all text-xs">Schließen</button>
-      </div>
-    </ModalShell>
-  );
+      </ModalShell>
+    );
+  };
 
   const renderFavoritesModal = () => (
     <ModalShell C={C} maxW="max-w-lg">
@@ -1269,6 +1342,9 @@ const App = () => {
         </button>
         <button onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs">
           <FileSpreadsheet size={14} /> CSV
+        </button>
+        <button disabled={isUploadingSP || isExportingPDF} onClick={handleSharePointUpload} style={{ backgroundColor: '#0078d4' }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center gap-2 text-xs disabled:opacity-50">
+          {isUploadingSP ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} SharePoint
         </button>
         <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-8 py-2.5 rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm text-xs">Schließen</button>
       </div>

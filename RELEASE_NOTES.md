@@ -4,6 +4,13 @@
 
 ---
 
+## v0.6.0 - 2026-03-09
+- Neue Funktionen: 
+    -SharePoint Export
+    -PowerAutomate Link einstellbar
+- Neue PDF änderungen!
+
+
 ## v0.5.2 - 2026-03-06
 - Kein Changelog-Eintrag.
 ## v0.5.1 - 2026-03-06
