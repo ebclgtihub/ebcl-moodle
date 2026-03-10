@@ -10,7 +10,35 @@
   ],
   "permissions": [
     "core:default",
-  "store:default",
-  "updater:default"
+    "store:default",
+    "updater:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://accounts.zoho.eu/**" },
+        { "url": "https://www.zohoapis.eu/**" }
+      ]
+    },
+    {
+      "identifier": "http:allow-fetch-send",
+      "allow": [
+        { "url": "https://accounts.zoho.eu/**" },
+        { "url": "https://www.zohoapis.eu/**" }
+      ]
+    },
+    {
+      "identifier": "http:allow-fetch-read-body",
+      "allow": [
+        { "url": "https://accounts.zoho.eu/**" },
+        { "url": "https://www.zohoapis.eu/**" }
+      ]
+    },
+    {
+      "identifier": "http:allow-fetch-cancel-body",
+      "allow": [
+        { "url": "https://accounts.zoho.eu/**" },
+        { "url": "https://www.zohoapis.eu/**" }
+      ]
+    }
   ]
 }

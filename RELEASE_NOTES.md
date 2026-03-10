@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- feat: Zoho CRM einbindung
+- feat: Tags 
+- fix: kleine änderungen 
+
 ---
 
 ## v0.9.0 - 2026-03-09

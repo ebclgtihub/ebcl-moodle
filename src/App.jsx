@@ -1,24 +1,26 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
 import { enrollInMoodle } from './moodle';
+import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
+import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
 import * as XLSX from 'xlsx';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import {
   Users, FileSpreadsheet, CheckCircle2, Building2, Plus,
   Loader2, Table as TableIcon, Check, AlertTriangle, ChevronDown,
   Eye, X, RefreshCw, Info, Settings, HelpCircle, BookOpen,
   Zap, ClipboardList, ShieldCheck, GraduationCap, FileDown,
-  Save, Wifi, WifiOff, Star, StarOff, Trash2, History,
-  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload, EyeOff
+  Save, Wifi, WifiOff, Trash2, History,
+  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload, EyeOff, Tag
 } from 'lucide-react';
 
 /**
  * Moodle Anmeldungen V4
- * - FAVORITEN: Institute speichern, laden, löschen + Schnellwahl-Dropdown
  * - VALIDIERUNG: Rote Matrix-Markierung bei fehlenden Kurszuweisungen
  * - ALLE ZUWEISEN: Ein-Klick alle Klassen auf alle aktiven Kurse
  * - KLASSEN-NAMEN: Anpassbar in den Settings
@@ -50,6 +52,7 @@ const DEFAULT_CONFIG = {
   autoPassword: false,
   showLeitfaden: true,
   enrolPeriod: 31,
+  defaultEnrolPeriod: 31,
   enrolDate: new Date().toISOString().split('T')[0],
   classSizes: [15, 20, 30, 40],
   classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
@@ -61,7 +64,11 @@ const DEFAULT_CONFIG = {
   sharepointUrl: '***ENTFERNT***',
   moodleUrl: '',
   moodleToken: '',
-  moodleEnabled: false,
+  zohoClientId: '',
+  zohoClientSecret: '',
+  zohoRefreshToken: '',
+  customAccents: ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'],
+  tagColorMap: {},
 };
 
 
@@ -88,6 +95,7 @@ const findValueByPattern = (item, patterns) => {
   return null;
 };
 const isGuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+const DEFAULT_ACCENTS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
 const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
 const fmtTime = d => d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const fmtDate = d => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -180,12 +188,22 @@ const App = () => {
   const [isMoodleEnrolling, setIsMoodleEnrolling] = useState(false);
   const [showMoodleToken, setShowMoodleToken] = useState(false);
   const [showMoodleConfirm, setShowMoodleConfirm] = useState(false);
+  const [zohoAllAccounts, setZohoAllAccounts] = useState([]);
+  const [zohoSearching, setZohoSearching] = useState(false);
+  const [openCourseSlot, setOpenCourseSlot] = useState(null);
+  const [courseSlotSearch, setCourseSlotSearch] = useState('');
+  const [zohoDropdownOpen, setZohoDropdownOpen] = useState(false);
+  const [zohoSelectedId, setZohoSelectedId] = useState(null);
+  const [instituteSearch, setInstituteSearch] = useState('');
+  const [showZohoRefreshToken, setShowZohoRefreshToken] = useState(false);
+  const [showZohoTokenModal, setShowZohoTokenModal] = useState(false);
+  const [zohoGrantCode, setZohoGrantCode] = useState('');
+  const [isExchangingZohoToken, setIsExchangingZohoToken] = useState(false);
   const [isStoreLoaded, setIsStoreLoaded] = useState(false);
   const [saveStatus, setSaveStatus] = useState('idle');
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [favorites, setFavorites] = useState([]);
   const [exportHistory, setExportHistory] = useState([]);
   const [invalidClassIds, setInvalidClassIds] = useState(new Set());
   const [pendingUpdate, setPendingUpdate] = useState(null);
@@ -194,6 +212,9 @@ const App = () => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [settingsTab, setSettingsTab] = useState('allgemein');
   const [showSessionResetConfirm, setShowSessionResetConfirm] = useState(false);
+  const [showGenerateConfirm, setShowGenerateConfirm] = useState(false);
+  const [moodleProgress, setMoodleProgress] = useState(null); // null | { label, pct, done, error }
+  const [moodleResult, setMoodleResult] = useState(null); // null | { moodleSummary, sharepoint, zoho }
   const [appVersion, setAppVersion] = useState('...');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
@@ -258,7 +279,6 @@ const App = () => {
       if (update) {
         setPendingUpdate(update);
         setActiveModal(null);
-        addToast(`Update v${update.version} verfügbar — Banner oben!`, 'success');
       } else {
         addToast('App ist bereits aktuell.', 'success', 3000);
       }
@@ -289,9 +309,8 @@ const App = () => {
         }
         if (event.event === 'Finished') { setInstallProgress(100); }
       });
-      addToast('Update installiert — App wird neu gestartet…', 'success', 0);
-      setPendingUpdate(null);
-    } catch { addToast('Update-Installation fehlgeschlagen.', 'error'); setIsInstalling(false); }
+      await relaunch();
+    } catch (e) { addToast(`Update fehlgeschlagen: ${e.message}`, 'error'); setIsInstalling(false); }
   }, [pendingUpdate, addToast]);
 
   // ─── Store: Laden ─────────────────────────────────────────────────────────
@@ -300,8 +319,6 @@ const App = () => {
       try {
         const ts = await store.get('lastSavedAt');
         if (ts) setLastSavedAt(new Date(ts));
-        const favs = await store.get('favorites');
-        if (favs) setFavorites(favs);
         const hist = await store.get('exportHistory');
         if (hist) setExportHistory(hist);
         const dm = await store.get('darkMode');
@@ -324,8 +341,18 @@ const App = () => {
         if (moodleUrl) setConfig(p => ({ ...p, moodleUrl }));
         const moodleToken = await store.get('moodleToken');
         if (moodleToken) setConfig(p => ({ ...p, moodleToken }));
-        const moodleEnabled = await store.get('moodleEnabled');
-        if (moodleEnabled !== null && moodleEnabled !== undefined) setConfig(p => ({ ...p, moodleEnabled }));
+        const zohoClientId = await store.get('zohoClientId');
+        if (zohoClientId) setConfig(p => ({ ...p, zohoClientId }));
+        const zohoClientSecret = await store.get('zohoClientSecret');
+        if (zohoClientSecret) setConfig(p => ({ ...p, zohoClientSecret }));
+        const zohoRefreshToken = await store.get('zohoRefreshToken');
+        if (zohoRefreshToken) setConfig(p => ({ ...p, zohoRefreshToken }));
+        const defaultEnrolPeriod = await store.get('defaultEnrolPeriod');
+        if (defaultEnrolPeriod != null) setConfig(p => ({ ...p, defaultEnrolPeriod, enrolPeriod: defaultEnrolPeriod }));
+        const customAccents = await store.get('customAccents');
+        if (Array.isArray(customAccents) && customAccents.length) setConfig(p => ({ ...p, customAccents }));
+        const tagColorMap = await store.get('tagColorMap');
+        if (tagColorMap && typeof tagColorMap === 'object') setConfig(p => ({ ...p, tagColorMap }));
       } catch (e) {
         console.error('Store laden:', e);
         addToast('Einstellungen konnten nicht geladen werden.', 'error');
@@ -345,7 +372,6 @@ const App = () => {
       try {
         const now = new Date().toISOString();
         await store.set('lastSavedAt', now);
-        await store.set('favorites', favorites);
         await store.set('exportHistory', exportHistory);
         await store.set('darkMode', darkMode);
         await store.set('classSizes', config.classSizes);
@@ -356,7 +382,12 @@ const App = () => {
         await store.set('showLeitfaden', config.showLeitfaden);
         await store.set('moodleUrl', config.moodleUrl);
         await store.set('moodleToken', config.moodleToken);
-        await store.set('moodleEnabled', config.moodleEnabled);
+        await store.set('zohoClientId', config.zohoClientId);
+        await store.set('zohoClientSecret', config.zohoClientSecret);
+        await store.set('zohoRefreshToken', config.zohoRefreshToken);
+        await store.set('defaultEnrolPeriod', config.defaultEnrolPeriod);
+        await store.set('customAccents', config.customAccents);
+        await store.set('tagColorMap', config.tagColorMap);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -367,7 +398,83 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [favorites, exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.moodleEnabled, isStoreLoaded]); // eslint-disable-line
+  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, isStoreLoaded]); // eslint-disable-line
+
+  // ─── Zoho: Alle Accounts laden (einmalig wenn aktiviert) ──────────────────
+  const zohoEnabled = !!(config.zohoClientId && config.zohoClientSecret && config.zohoRefreshToken);
+  useEffect(() => {
+    console.log('[Zoho] zohoEnabled:', zohoEnabled, {
+      hasClientId: !!config.zohoClientId,
+      hasClientSecret: !!config.zohoClientSecret,
+      hasRefreshToken: !!config.zohoRefreshToken,
+    });
+    if (!zohoEnabled) { setZohoAllAccounts([]); return; }
+    console.log('[Zoho] Starte Account-Ladung...');
+    setZohoSearching(true);
+    getAllZohoAccounts(config)
+      .then(accounts => {
+        const sorted = [...accounts].sort((a, b) => a.Account_Name.localeCompare(b.Account_Name, 'de'));
+        console.log('[Zoho] Accounts geladen:', sorted.length, sorted.slice(0, 3));
+        setZohoAllAccounts(sorted);
+      })
+      .catch(e => console.error('[Zoho] Accounts laden fehlgeschlagen:', e.message, e))
+      .finally(() => setZohoSearching(false));
+  }, [zohoEnabled]); // eslint-disable-line
+
+  // ─── Zoho: Gefilterte Vorschläge (client-side) ─────────────────────────────
+  const zohoSuggestions = useMemo(() => {
+    if (!zohoEnabled || !zohoAllAccounts.length) return [];
+    const q = config.institute?.trim().toLowerCase().replace(/-/g, ' ');
+    console.log('[Zoho] Filter:', { q, total: zohoAllAccounts.length, treffer: zohoAllAccounts.filter(a => !q || a.Account_Name.toLowerCase().includes(q)).length });
+    if (!q) return zohoAllAccounts;
+    return zohoAllAccounts.filter(a =>
+      a.Account_Name.toLowerCase().includes(q)
+    );
+  }, [zohoAllAccounts, config.institute, zohoEnabled]);
+
+  // Breite der Tag-Spalte im Kurs-Dropdown: so breit wie das längste Tag
+  const courseTagColWidth = useMemo(() => {
+    const maxLen = Math.max(0, ...courseDictionary.map(c => c.tag?.length ?? 0));
+    return maxLen > 0 ? `${maxLen * 7 + 16}px` : '0px';
+  }, [courseDictionary]);
+
+  const getTagColor = useCallback(tag => {
+    if (!tag) return '#94a3b8';
+    const palette = config.customAccents?.length ? config.customAccents : DEFAULT_ACCENTS;
+    const idx = config.tagColorMap?.[tag];
+    return idx != null ? (palette[idx] ?? palette[0]) : palette[0];
+  }, [config.customAccents, config.tagColorMap]);
+
+  // ─── Zoho: Grant Code → Refresh Token tauschen ────────────────────────────
+  const handleZohoTokenExchange = useCallback(async () => {
+    if (!zohoGrantCode.trim() || !config.zohoClientId || !config.zohoClientSecret) {
+      addToast('Bitte zuerst Client ID, Client Secret und Grant Code eintragen.', 'error');
+      return;
+    }
+    setIsExchangingZohoToken(true);
+    try {
+      const rawText = await invoke('zoho_exchange_token', {
+        clientId: config.zohoClientId,
+        clientSecret: config.zohoClientSecret,
+        code: zohoGrantCode.trim(),
+      });
+      console.log('[Zoho] Token-Exchange Response:', rawText);
+      let data;
+      try { data = JSON.parse(rawText); } catch { throw new Error(`Ungültige Antwort: ${rawText}`); }
+      if (!data.refresh_token) {
+        throw new Error(data.error_description || data.error || rawText);
+      }
+      setConfig(p => ({ ...p, zohoRefreshToken: data.refresh_token }));
+      setZohoGrantCode('');
+      setShowZohoTokenModal(false);
+      addToast('Zoho Refresh Token erfolgreich generiert und gespeichert!', 'success');
+    } catch (e) {
+      console.error('[Zoho] Token-Exchange Fehler:', e);
+      addToast(`Zoho Token-Exchange fehlgeschlagen: ${e?.message ?? String(e)}`, 'error', 0);
+    } finally {
+      setIsExchangingZohoToken(false);
+    }
+  }, [zohoGrantCode, config.zohoClientId, config.zohoClientSecret, addToast]);
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -386,8 +493,13 @@ const App = () => {
           if (sh.length < 2) sh = String(label).substring(0, 3).toUpperCase();
         }
         const url = findValueByPattern(item, ['url', 'link', 'hyperlink', 'moodle', 'portal']) || '';
-        return { id: String(rawId), label: String(label).trim(), shorthand: String(sh).trim(), url: String(url).trim() };
+        const tag = findValueByPattern(item, ['tag', 'tags', 'kategorie', 'category', 'typ', 'type', 'gruppe', 'group']) || '';
+        return { id: String(rawId), label: String(label).trim(), shorthand: String(sh).trim(), url: String(url).trim(), tag: String(tag).trim() };
       });
+      if (normalized.length === 0) {
+        addToast('Kurs-Pool ist leer — Cache bleibt erhalten.', 'error');
+        return;
+      }
       setCourseDictionary(normalized);
       if (normalized.length > 0) {
         setConfig(prev => {
@@ -422,11 +534,25 @@ const App = () => {
     return rows;
   }, [config.classCounts, config.classSizes]);
 
-  const rawEndDate = useMemo(() => { const d = new Date(config.enrolDate); d.setDate(d.getDate() + parseInt(config.enrolPeriod || 0)); return d; }, [config.enrolDate, config.enrolPeriod]);
+  const rawEndDate = useMemo(() => {
+    const d = new Date(config.enrolDate);
+    if (isNaN(d.getTime())) return new Date();
+    d.setDate(d.getDate() + Math.max(1, parseInt(config.enrolPeriod || 1)));
+    return d;
+  }, [config.enrolDate, config.enrolPeriod]);
   const endDateDisplay = rawEndDate.toISOString().split('T')[0];
   const endDateFormatted = rawEndDate.toLocaleDateString('de-DE');
 
   const totalStudents = useMemo(() => classRows.reduce((s, r) => s + r.size, 0), [classRows]);
+
+  const unusualWarnings = useMemo(() => {
+    const w = [];
+    if (config.trainerCount > 20) w.push(`${config.trainerCount} Trainer (ungewöhnlich hoch)`);
+    if (totalStudents > 500) w.push(`${totalStudents} Schüler (ungewöhnlich hoch)`);
+    if (parseInt(config.enrolPeriod, 10) > 730) w.push(`Einschreibung ${config.enrolPeriod} Tage (> 2 Jahre)`);
+    if (config.classSizes.some(s => s > 60)) w.push(`Klassengröße > 60 Schüler`);
+    return w;
+  }, [config.trainerCount, config.enrolPeriod, config.classSizes, totalStudents]);
 
   // false | 'dauer' | 'abgelaufen'
   const isEnrolInvalid = useMemo(() => {
@@ -447,13 +573,22 @@ const App = () => {
     const { name, value } = e.target;
     const isNum = ['enrolPeriod', 'trainerCount', 'courseSlotCount'].includes(name);
     const isPwd = ['studentPwd', 'trainerPwd'].includes(name);
-    const processed = name === 'institute' ? value.replace(/ /g, '_') : isPwd ? value.trim() : value;
-    setConfig(p => ({ ...p, [name]: isNum ? Math.max(0, parseInt(value, 10) || 0) : processed }));
+    const isInstitute = name === 'institute';
+    const processed = isPwd ? value.trim() : isInstitute ? value.replace(/\s+/g, '-') : value;
+    const NUM_MIN = { trainerCount: 0, courseSlotCount: 1, enrolPeriod: 1 };
+    setConfig(p => {
+      if (isNum) {
+        const raw = parseInt(value, 10) || 0;
+        const lo = NUM_MIN[name] ?? 0;
+        return { ...p, [name]: Math.max(lo, raw) };
+      }
+      return { ...p, [name]: processed };
+    });
   }, []);
   const handleEndDateInput = useCallback(e => {
     if (!e.target.value) return;
     const diff = Math.ceil((new Date(e.target.value) - new Date(config.enrolDate)) / 86400000);
-    setConfig(p => ({ ...p, enrolPeriod: Math.max(0, diff) }));
+    setConfig(p => ({ ...p, enrolPeriod: Math.max(1, diff) }));
   }, [config.enrolDate]);
   const updateClassSize = useCallback((idx, val) => setConfig(p => { const s = [...p.classSizes]; s[idx] = Math.max(0, parseInt(val, 10) || 0); return { ...p, classSizes: s }; }), []);
   const updateClassCount = useCallback((idx, val) => setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) } })), []);
@@ -471,6 +606,7 @@ const App = () => {
     const activeIds = config.selectedPoolCourseIds.slice(0, config.courseSlotCount).filter(id => id !== 'none').map(String);
     const stillBad = new Set();
     classRows.forEach(r => {
+      if (r.size === 0) return;
       const assigned = (classMatrix[r.id] || []).map(String);
       if (!assigned.some(id => activeIds.includes(id))) stillBad.add(r.id);
     });
@@ -520,24 +656,6 @@ const App = () => {
     addToast('Neue Liste gestartet.', 'success');
   }, [addToast]);
 
-  // ─── Favoriten ────────────────────────────────────────────────────────────
-  const saveFavorite = useCallback(() => {
-    if (!config.institute?.trim()) return addToast('Bitte zuerst Institutsnamen eingeben.', 'error');
-    const fav = { id: Date.now().toString(), name: config.institute.trim(), config: { ...config }, matrix: { ...classMatrix }, savedAt: new Date().toISOString() };
-    setFavorites(prev => [fav, ...prev.filter(f => f.name !== fav.name)]);
-    addToast(`"${fav.name}" als Favorit gespeichert.`, 'success');
-  }, [config, classMatrix, addToast]);
-
-  const loadFavorite = useCallback(fav => {
-    setConfig({ ...DEFAULT_CONFIG, ...fav.config, enrolDate: new Date().toISOString().split('T')[0] });
-    setClassMatrix(fav.matrix || {});
-    setIsGenerated(false); setInvalidClassIds(new Set());
-    addToast(`"${fav.name}" geladen.`, 'success');
-    setActiveModal(null);
-  }, [addToast]);
-
-  const deleteFavorite = useCallback(id => setFavorites(prev => prev.filter(f => f.id !== id)), []);
-
   // ─── Export-History ───────────────────────────────────────────────────────
   const addExportEntry = useCallback((type, filename) => {
     setExportHistory(prev => [{
@@ -548,12 +666,15 @@ const App = () => {
   }, [config.institute, generatedData]);
 
   // ─── Generierung ──────────────────────────────────────────────────────────
-  const generateList = useCallback(() => {
+  const generateList = useCallback((confirmed = false) => {
     if (!config.institute?.trim()) return addToast('Bitte Institutsnamen eingeben.', 'error');
     if (!classRows.length && !config.trainerCount) return addToast('Keine Klassen oder Trainer.', 'error');
+    if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
+    setShowGenerateConfirm(false);
     const activeIds = activeMatrixCourses.map(c => String(c.id));
     const badIds = new Set();
     classRows.forEach(r => {
+      if (r.size === 0) return; // Klassen ohne Schüler brauchen keine Kurszuweisung
       const assigned = (classMatrix[r.id] || []).map(String);
       if (!assigned.some(id => activeIds.includes(id))) badIds.add(r.id);
     });
@@ -575,7 +696,7 @@ const App = () => {
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
     addToast(`${data.length} Accounts generiert.`, 'success');
-  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast]);
+  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast, unusualWarnings]);
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
   const buildCsvBlob = useCallback(() => {
@@ -940,9 +1061,14 @@ const App = () => {
 
   // ─── Moodle Einschreibung ──────────────────────────────────────────────────
   const handleMoodleEnrol = useCallback(async () => {
+    const progress = (label, pct) => setMoodleProgress({ label, pct, done: false, error: false });
     setIsMoodleEnrolling(true);
+    setMoodleProgress({ label: 'Verbindung aufbauen…', pct: 2, done: false, error: false });
+
+    let result;
     try {
-      const result = await enrollInMoodle({
+      // ── Schritt 1–5: Moodle ───────────────────────────────────────────────
+      result = await enrollInMoodle({
         baseUrl: config.moodleUrl,
         token: config.moodleToken,
         generatedData,
@@ -950,71 +1076,126 @@ const App = () => {
         classRows,
         config,
         getClassLabel,
+        onProgress: progress,
       });
+    } catch (e) {
+      console.error('[Moodle] Fehler:', e);
+      setMoodleProgress({ label: `Fehler: ${e.message}`, pct: 0, done: false, error: true });
+      setIsMoodleEnrolling(false);
+      return; // Abbruch — kein SharePoint, kein Zoho
+    }
 
-      result.warnings.forEach(w => addToast(w, 'info'));
-      addToast(
-        `Moodle: ${result.usersResolved} User, ${result.enrolmentsDone} Einschreibungen, ${result.groupsCreated} Gruppen`,
-        'success',
-        8000
-      );
-      addExportEntry('Moodle', `Moodle-Einschreibung`);
+    result.warnings.forEach(w => addToast(w, 'info'));
+    addExportEntry('Moodle', 'Moodle-Einschreibung');
+    let sharepointDone = false;
+    let zohoDone = false;
 
-      // ── SharePoint Upload: TXT-Zusammenfassung + PDF + Excel ───────────────
-      if (config.sharepointUrl) {
-        const now = new Date();
-        const dateStr = now.toISOString().split('T')[0];
-        const instClean = config.institute.replace(/\s+/g, '_');
-        const folderName = `${instClean}_${dateStr}_Moodle`;
-
-        // TXT-Zusammenfassung aufbauen
-        const lines = [
-          `EBCL Moodle-Einschreibung – Zusammenfassung`,
-          `==========================================`,
-          `Institut:        ${config.institute}`,
-          `Datum:           ${fmtDateTime(now)}`,
-          `Moodle-URL:      ${config.moodleUrl}`,
-          ``,
-          `Ergebnis`,
-          `--------`,
-          `User aufgelöst:   ${result.usersResolved}`,
-          `Neu angelegt:     ${result.usersCreated}`,
-          `Einschreibungen:  ${result.enrolmentsDone}`,
-          `Gruppen:          ${result.groupsCreated}`,
-          ``,
-          ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
-          `Accounts`,
-          `--------`,
-          ...generatedData.map(u =>
-            `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
-          ),
-        ];
-        const txtBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
-        const txtName = `EBCL-Moodle-Import-${instClean}-${dateStr}.txt`;
-        const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
-        const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
-
-        const [pdfBlob, xlsxBlob] = await Promise.all([
-          downloadPDF({ returnBlob: true }),
-          downloadExcel({ returnBlob: true }),
-        ]);
-
+    // ── Schritt 6: SharePoint ─────────────────────────────────────────────
+    if (config.sharepointUrl) {
+      progress('SharePoint hochladen…', 88);
+      const now = new Date();
+      const dateStr = now.toISOString().split('T')[0];
+      const instClean = config.institute.replace(/\s+/g, '_');
+      const folderName = `${instClean}_${dateStr}_Moodle`;
+      const existingUsers = result.usersResolved - result.usersCreated;
+      const cohortStatus = result.cohortId
+        ? `${result.cohortName} (ID ${result.cohortId}, ${result.cohortCreated ? 'neu angelegt' : 'bereits vorhanden'}, ${result.cohortMembersAdded} Mitglieder)`
+        : 'nicht angelegt';
+      const lines = [
+        'EBCL Moodle-Einschreibung – Zusammenfassung',
+        '==========================================',
+        `Institut:        ${config.institute}`,
+        `Datum:           ${fmtDateTime(now)}`,
+        `Moodle-URL:      ${config.moodleUrl}`,
+        '',
+        'Ergebnis', '--------',
+        `User gesamt:      ${result.usersResolved}`,
+        `  Neu angelegt:   ${result.usersCreated}`,
+        `  Bereits vorh.:  ${existingUsers}`,
+        `Einschreibungen:  ${result.enrolmentsDone}`,
+        `Gruppen:          ${result.groupsCreated}`,
+        '',
+        'Kohorte', '-------',
+        `Name:    ${result.cohortName}`,
+        `Status:  ${cohortStatus}`,
+        '',
+        'Kurse', '-----',
+        ...activeMatrixCourses.map(c => `  ${c.shorthand}  ${c.label}`),
+        '',
+        ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
+        'Accounts', '--------',
+        ...generatedData.map(u =>
+          `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
+        ),
+      ];
+      const txtBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
+      const txtName = `EBCL-Moodle-Import-${instClean}-${dateStr}.txt`;
+      const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
+      const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
+      try {
+        const pdfBlob = await downloadPDF({ returnBlob: true });
+        const xlsxBlob = await downloadExcel({ returnBlob: true });
         if (pdfBlob && xlsxBlob) {
           const ok = await uploadMoodleResultToSharePoint(
             txtBlob, pdfBlob, xlsxBlob,
             folderName, txtName, pdfName, xlsxName,
             config.sharepointUrl
           );
-          if (ok) addToast(`SharePoint: Ordner „${folderName}" erstellt.`, 'success');
-          else addToast('SharePoint-Upload fehlgeschlagen.', 'error');
+          if (!ok) throw new Error('Upload-Antwort negativ');
+          sharepointDone = true;
         }
+      } catch (spErr) {
+        console.error('[SharePoint] Fehler:', spErr);
+        setMoodleProgress({ label: `SharePoint-Fehler: ${spErr.message}`, pct: 88, done: false, error: true });
+        setIsMoodleEnrolling(false);
+        return; // Abbruch — kein Zoho
       }
-    } catch (e) {
-      addToast(`Moodle-Fehler: ${e.message}`, 'error', 0);
-    } finally {
-      setIsMoodleEnrolling(false);
     }
-  }, [config, generatedData, activeMatrixCourses, classRows, getClassLabel, addToast, addExportEntry, downloadPDF, downloadExcel]);
+
+    // ── Schritt 7: Zoho CRM ───────────────────────────────────────────────
+    if (zohoEnabled) {
+      progress('Zoho CRM aktualisieren…', 95);
+      try {
+        const { account, created } = await findOrCreateZohoAccount(config, config.institute);
+        const today = new Date().toISOString().split('T')[0];
+        const enrolStart = new Date(config.enrolDate).toLocaleDateString('de-DE');
+        const dealName = `Moodle Einschreibung – ${enrolStart} – ${endDateFormatted}`;
+        const description = [
+          `Institut: ${config.institute}`,
+          `Datum: ${fmtDateTime(new Date())}`,
+          `Einschreibezeitraum: ${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`,
+          '',
+          `User: ${result.usersResolved} gesamt (${result.usersCreated} neu, ${result.usersResolved - result.usersCreated} bereits vorhanden)`,
+          `Einschreibungen: ${result.enrolmentsDone}`,
+          `Gruppen: ${result.groupsCreated}`,
+          `Kohorte: ${result.cohortName}${result.cohortId ? ` (ID ${result.cohortId})` : ' – nicht gefunden'}`,
+          '',
+          `Kurse: ${activeMatrixCourses.map(c => c.shorthand).join(', ')}`,
+          `Moodle-URL: ${config.moodleUrl}`,
+        ].join('\n');
+        await createZohoDeal(config, account.id, dealName, today, description);
+        zohoDone = true;
+      } catch (e) {
+        console.error('[Zoho] CRM-Fehler:', e);
+        setMoodleProgress({ label: `CRM-Fehler: ${e?.message || String(e)}`, pct: 95, done: false, error: true });
+        setIsMoodleEnrolling(false);
+        return;
+      }
+    }
+
+    // ── Fertig ────────────────────────────────────────────────────────────
+    const existing = result.usersResolved - result.usersCreated;
+    const moodleSummary = [
+      result.usersCreated > 0 && `${result.usersCreated} neue Accounts`,
+      existing > 0 && `${existing} bereits vorhanden`,
+      `${result.enrolmentsDone} Einschreibungen`,
+      result.groupsCreated > 0 && `${result.groupsCreated} Gruppen`,
+    ].filter(Boolean).join(' · ');
+    setMoodleProgress({ label: 'Fertig', pct: 100, done: true, error: false });
+    setMoodleResult({ moodleSummary, sharepoint: sharepointDone, zoho: zohoDone });
+    setIsMoodleEnrolling(false);
+    setTimeout(() => setMoodleProgress(null), 3000);
+  }, [config, generatedData, activeMatrixCourses, classRows, getClassLabel, addToast, addExportEntry, downloadPDF, downloadExcel, zohoEnabled, endDateFormatted]);
 
   // ─── Shortcuts ────────────────────────────────────────────────────────────
   generateRef.current = generateList; csvRef.current = downloadCSV; pdfRef.current = downloadPDF; assignRef.current = assignAll;
@@ -1064,6 +1245,8 @@ const App = () => {
       { id: 'config',   label: 'Konfiguration', icon: <Settings size={13} /> },
       { id: 'matrix',   label: 'Kurs-Matrix',   icon: <TableIcon size={13} /> },
       { id: 'export',   label: 'Export',         icon: <FileDown size={13} /> },
+      { id: 'moodle',   label: 'Moodle',         icon: <GraduationCap size={13} /> },
+      { id: 'zoho',     label: 'Zoho CRM',       icon: <Users size={13} /> },
       { id: 'shortcuts',label: 'Shortcuts',      icon: <Keyboard size={13} /> },
     ];
     const HSection = ({ icon, title, children }) => (
@@ -1083,7 +1266,7 @@ const App = () => {
       </div>
     );
     return (
-      <ModalShell C={C} maxW="max-w-2xl" zIndex={250}>
+      <ModalShell C={C} maxW="max-w-3xl" zIndex={250}>
         {/* Header */}
         <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-6 pt-6 pb-0 border-b shrink-0">
           <div className="flex justify-between items-center mb-4">
@@ -1103,7 +1286,7 @@ const App = () => {
                 style={helpTab === t.id
                   ? { color: C.main, borderColor: C.main, backgroundColor: C.card }
                   : { color: C.muted, borderColor: 'transparent', backgroundColor: 'transparent' }}
-                className="flex items-center gap-1.5 px-3 py-2 text-[10px] font-bold uppercase tracking-widest border-b-2 transition-all hover:opacity-80 rounded-t-lg">
+                className="flex items-center gap-1 px-2.5 py-2 text-[9px] font-bold uppercase tracking-wider border-b-2 transition-all hover:opacity-80 rounded-t-lg whitespace-nowrap">
                 {t.icon}{t.label}
               </button>
             ))}
@@ -1117,17 +1300,16 @@ const App = () => {
           {helpTab === 'workflow' && (
             <div>
               <HSection icon={<Zap size={14} />} title="Was macht dieses Programm?">
-                <Info>EBCL-Moodle erstellt automatisch hunderte Moodle-Zugangsdaten für Partnerinstitute. Du konfigurierst einmal die Klassen- und Kursstruktur, generierst die Zugänge und exportierst sie — fertig.</Info>
+                <Info>EBCL-Moodle erstellt automatisch Moodle-Zugangsdaten für Partnerinstitute. Du konfigurierst einmal die Klassen- und Kursstruktur, generierst die Zugänge und exportierst oder schreibst direkt ein — fertig.</Info>
                 <Info>Die Kursliste wird automatisch vom EBCL-Server geladen und lokal gecacht, sodass die App auch offline funktioniert.</Info>
               </HSection>
               <HSection icon={<Users size={14} />} title="Schritt-für-Schritt Workflow">
                 {[
-                  ['01', C.accent1, 'Institutsname eingeben', 'Den Namen des Partnerinstituts im Feld oben links eintragen. Pflichtfeld — ohne Namen kann nicht generiert werden.'],
-                  ['02', C.accent2, 'Klassen & Trainer definieren', 'Anzahl der Klassen pro Typ (15/20/30/40 Plätze) und Traineranzahl festlegen. Klassengrößen sind im Settings-Panel anpassbar.'],
-                  ['03', C.main,   'Kurse zuweisen', 'In der Kurs-Matrix die gewünschten Kurse pro Spalte auswählen und jeder Klasse zuweisen. "Alle zuweisen" (⌘A) belegt alle Klassen auf einmal.'],
-                  ['04', '#7C3AED','Liste generieren', 'Auf "Liste generieren" klicken (⌘G). Die App prüft ob alle Klassen mindestens einen Kurs haben — fehlende werden rot markiert.'],
-                  ['05', '#B45309','Exportieren', 'CSV (⌘E) für den Moodle-Import, PDF (⌘P) als Zugangsdaten-Blatt für das Institut. Beide Formate enthalten alle Accounts.'],
-                  ['06', '#059669','Favorit speichern', 'Das Institut per ⭐-Button als Favorit speichern. Beim nächsten Mal ist die komplette Konfiguration per Klick wiederhergestellt.'],
+                  ['01', C.accent1,  'Institutsname eingeben',     'Den Namen des Partnerinstituts eingeben (Leerzeichen werden automatisch zu Bindestrichen). Pflichtfeld.'],
+                  ['02', C.accent2,  'Klassen & Trainer definieren','Anzahl der Klassen pro Typ und Traineranzahl festlegen. Klassengrößen sind in den Einstellungen anpassbar.'],
+                  ['03', C.main,     'Kurse zuweisen',              'In der Kurs-Matrix Kurse pro Spalte wählen und jeder Klasse zuweisen. "Alle zuweisen" (⌘⇧A) belegt alle auf einmal.'],
+                  ['04', '#7C3AED',  'Liste generieren',            '⌘G — App prüft Vollständigkeit und markiert fehlende Zuweisungen rot.'],
+                  ['05', '#0078d4',  'Exportieren oder Einschreiben','CSV/PDF/Excel lokal speichern, direkt zu SharePoint hochladen oder via Moodle REST API direkt einschreiben.'],
                 ].map(([n, col, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
@@ -1135,8 +1317,9 @@ const App = () => {
                   </div>
                 ))}
               </HSection>
-              <HSection icon={<Info size={14} />} title="Was wird beim Neustart zurückgesetzt?">
-                <Info>Bei jedem App-Start wird alles auf Standard zurückgesetzt: Institutsname, Datum, Kursauswahl und Klassenzuweisungen. <strong style={{ color: C.text }}>Erhalten bleiben:</strong> Favoriten, Export-History, Klassengrößen, Klassen-Namen und Dark Mode.</Info>
+              <HSection icon={<RefreshCw size={14} />} title="Was wird beim Neustart zurückgesetzt?">
+                <Info>Bei jedem App-Start wird zurückgesetzt: Institutsname, Datum, Kursauswahl und Klassenzuweisungen.</Info>
+                <Info><strong style={{ color: C.text }}>Erhalten bleiben:</strong> Export-History, Klassengrößen, Klassen-Namen, Passwörter, Backend-URLs, Moodle-Token und Dark Mode.</Info>
               </HSection>
             </div>
           )}
@@ -1145,23 +1328,20 @@ const App = () => {
           {helpTab === 'config' && (
             <div className="space-y-1">
               <HSection icon={<Building2 size={14} />} title="Organisation">
-                <Row label="Institutsname" desc="Pflichtfeld. Wird in Dateinamen, PDF-Header und als Präfix für alle Usernamen verwendet. (z.B. 'VHS Wien' → 'vhswien-student-001')" />
-                <Row label="Trainer" desc="Anzahl der Trainer-Accounts. Trainer erhalten Zugang zu allen aktiven Kursen und werden auf einer eigenen PDF-Seite aufgeführt." />
-                <Row label="Kurs Anzahl" desc="Wie viele Kursspalten in der Matrix angezeigt werden (max. 8). Entspricht der Anzahl der Moodle-Kurse, die belegt werden sollen." />
+                <Row label="Institutsname" desc="Pflichtfeld. Leerzeichen werden automatisch zu Bindestrichen. Wird als Präfix für alle Usernamen, im Dateinamen und im PDF verwendet." />
+                <Row label="Trainer" desc="Anzahl der Trainer-Accounts. Trainer werden in ALLE aktiven Kurse eingeschrieben (Rolle: Lehrbeauftragter) und zu allen Klassen-Gruppen hinzugefügt." />
+                <Row label="Kurs Anzahl" desc="Anzahl der Kursspalten in der Matrix (max. 8). Entspricht der Anzahl der Moodle-Kurse pro Institut." />
               </HSection>
               <HSection icon={<GraduationCap size={14} />} title="Klassen Struktur">
-                <Row label="Typen (15/20/30/40)" desc="Jeder Typ definiert eine Klassengröße. Über 'Anzahl' rechts bestimmst du, wie viele Klassen dieses Typs erstellt werden." />
-                <Row label="Klassengrößen" desc="Anpassbar in den Settings (⚙). Werden gespeichert und bleiben beim Neustart erhalten." />
-                <Row label="Klassen-Namen" desc="Optional in den Settings anpassbar (z.B. 'IT-Klasse A'). Standard: K-01, K-02, … Werden ebenfalls gespeichert." />
+                <Row label="Typen (Größen)" desc="Jeder Typ definiert eine Klassengröße (Standard: 15/20/30/40 Plätze). Über 'Anzahl' rechts bestimmst du wie viele Klassen dieses Typs erstellt werden." />
+                <Row label="Klassengrößen" desc="In den Einstellungen → Allgemein anpassbar. Werden gespeichert und bleiben beim Neustart erhalten." />
+                <Row label="Klassen-Namen" desc="Optional in den Einstellungen anpassbar (z.B. 'IT-Klasse A'). Standard: K-01, K-02, … Werden ebenfalls gespeichert." />
               </HSection>
-              <HSection icon={<ShieldCheck size={14} />} title="Zeit & Sicherheit">
-                <Row label="Einschreibedatum" desc="Ab wann die Accounts aktiv sind. Wird immer auf das heutige Datum gesetzt — auch beim Laden eines Favoriten." />
-                <Row label="Dauer (Tage)" desc="Wie lange die Einschreibung gilt. Das Enddatum wird automatisch berechnet und ist direkt editierbar." />
-                <Row label="PW Schüler / Trainer" desc="Passwörter für generierte Accounts. Standard: '***ENTFERNT***' / '***ENTFERNT***'. Bei jedem Start auf Standard zurückgesetzt." />
-              </HSection>
-              <HSection icon={<Star size={14} />} title="Favoriten">
-                <Info>Ein Favorit speichert: Institutsname, alle Konfigurationsfelder und die komplette Kursmatrix. Beim Laden wird nur das Datum auf heute gesetzt.</Info>
-                <Info>Favoriten bleiben auch nach einem Neustart erhalten und können im Favoriten-Modal verwaltet (gelöscht) werden.</Info>
+              <HSection icon={<ShieldCheck size={14} />} title="Zeit & Passwörter">
+                <Row label="Einschreibedatum" desc="Ab wann die Accounts in Moodle aktiv sind. Wird beim App-Start auf heute gesetzt." />
+                <Row label="Dauer (Tage)" desc="Gültigkeitsdauer der Einschreibung. Das Enddatum wird automatisch berechnet und ist direkt editierbar." />
+                <Row label="PW Schüler / Trainer" desc="Standard-Passwörter für generierte Accounts. Werden in den Einstellungen gesetzt und bleiben beim Neustart erhalten." />
+                <Row label="Auto-Passwort" desc="Generiert für jeden Account ein einzigartiges Zufalls-Passwort statt des Standard-Passworts." />
               </HSection>
             </div>
           )}
@@ -1170,18 +1350,25 @@ const App = () => {
           {helpTab === 'matrix' && (
             <div>
               <HSection icon={<BookOpen size={14} />} title="Kurs-Pool">
-                <Info>Die verfügbaren Kurse werden beim Start automatisch vom EBCL-Server geladen. Der zuletzt geladene Stand wird lokal gecacht — die App funktioniert damit auch offline.</Info>
-                <Row label="Kurse laden" desc="Über den 'Kurse laden'-Button in der Übersicht wird der Pool manuell neu synchronisiert (z.B. wenn neue Kurse hinzugekommen sind)." />
-                <Row label="Cache-Status" desc="In den Settings siehst du wie viele Kurse aktuell gecacht sind." />
+                <Info>Die verfügbaren Kurse werden beim Start automatisch vom EBCL-Server (Power Automate) geladen und lokal gecacht — die App funktioniert damit auch offline.</Info>
+                <Row label="Kurse laden" desc="Der 'Kurse laden'-Button synchronisiert den Pool manuell neu (z.B. wenn neue Kurse hinzugekommen sind)." />
+                <Row label="Kurs-ID" desc="Jeder Kurs im Pool sollte eine numerische Moodle-ID haben (für die direkte Einschreibung via REST API). Alternativ wird die ID aus der Kurs-URL extrahiert." />
+                <Row label="Vorschau" desc="'Kurs-Pool anzeigen' öffnet eine Übersicht aller gecachten Kurse mit Tag, ID, Shorthand und URL." />
+              </HSection>
+              <HSection icon={<Tag size={14} />} title="Kurs-Tags">
+                <Info>Kurse können in der Datenbank mit einem Tag versehen werden (Spalte: tag / tags / kategorie / typ). Tags werden farbig im Dropdown und in der Vorschau angezeigt — nur für den Client sichtbar, kein Einfluss auf Moodle.</Info>
+                <Row label="Farben" desc="Tags wählen ihre Farbe automatisch aus der Akzentpalette. Die 4 Akzentfarben können in den Einstellungen → Anpassen geändert werden." />
+                <Row label="Suche" desc="Im Kurs-Dropdown kann nach Kursname, Kürzel und Tag gefiltert werden." />
+                <Row label="Ausrichtung" desc="Die Tag-Spalte passt sich automatisch an den längsten Tag an — Kursnamen stehen dadurch immer auf gleicher Höhe." />
               </HSection>
               <HSection icon={<TableIcon size={14} />} title="Matrix-Bedienung">
-                <Row label="Kurs auswählen" desc="Im Dropdown oben in jeder Spalte einen Kurs aus dem Pool wählen. Bis zu 8 Kurse gleichzeitig möglich (je nach 'Kurs Anzahl'-Einstellung)." />
-                <Row label="Zuweisung (Checkboxen)" desc="Für jede Klasse per Checkbox bestimmen, welche Kurse sie erhält. Eine Klasse kann mehrere Kurse haben." />
-                <Row label="Spalten-'Alle'-Button" desc="Der blaue 'Alle'-Button im Spaltenkopf weist alle Klassen diesem Kurs zu — oder entfernt alle wieder (Toggle)." />
-                <Row label="Alle zuweisen (⌘A)" desc="Weist alle Klassen allen aktiven Kursen zu. Schnellster Weg wenn alle Klassen die gleichen Kurse bekommen sollen." />
+                <Row label="Kurs auswählen" desc="Im Dropdown oben in jeder Spalte einen Kurs aus dem Pool wählen. Mit Suche und Tag-Filterung. Bis zu 8 Kursspalten gleichzeitig möglich." />
+                <Row label="Zuweisung" desc="Per Checkbox bestimmen, welche Klassen welche Kurse erhalten. Eine Klasse kann mehrere Kurse haben." />
+                <Row label="Spalten-Alle-Button" desc="Der blaue 'Alle'-Button im Spaltenkopf weist alle Klassen diesem Kurs zu oder entfernt alle (Toggle)." />
+                <Row label="Alle zuweisen (⌘⇧A)" desc="Weist alle Klassen allen aktiven Kursen zu — schnellster Weg wenn alle Klassen dieselben Kurse bekommen." />
               </HSection>
               <HSection icon={<AlertTriangle size={14} />} title="Validierung">
-                <Info>Beim Klick auf "Liste generieren" prüft die App, ob jede Klasse mindestens einem aktiven Kurs zugewiesen ist. Klassen ohne Zuweisung werden <span style={{ color: '#e11d48' }}>rot markiert</span>. Die roten Markierungen verschwinden sobald eine Zuweisung gesetzt wird.</Info>
+                <Info>Beim Generieren prüft die App ob jede Klasse mindestens einem Kurs zugewiesen ist. Klassen ohne Zuweisung werden <span style={{ color: '#e11d48' }}>rot markiert</span>. Die Markierung verschwindet sobald eine Zuweisung gesetzt wird.</Info>
               </HSection>
             </div>
           )}
@@ -1190,22 +1377,127 @@ const App = () => {
           {helpTab === 'export' && (
             <div>
               <HSection icon={<FileSpreadsheet size={14} />} title="CSV-Export (⌘E)">
-                <Info>Die CSV-Datei ist das Moodle-Import-Format. Sie enthält alle generierten Accounts und Einschreibungen und kann direkt in Moodle hochgeladen werden.</Info>
-                <Row label="Inhalt" desc="Username, Passwort, Vorname, Nachname, E-Mail, Kurs-Shorthand, Kursgruppe, Rolle und Einschreibedauer pro Zeile." />
-                <Row label="Dateiname" desc="EBCL-Moodle-Upload-{Institut}-{Datum}.csv" />
-                <Row label="Kodierung" desc="UTF-8 mit BOM — für maximale Excel-Kompatibilität (Umlaute werden korrekt angezeigt)." />
-                <Row label="Verwendung" desc="In Moodle: Administration → Nutzer → Nutzer hochladen → CSV-Datei auswählen." />
+                <Info>Moodle-Import-Format. Enthält alle generierten Accounts mit Einschreibungen und kann direkt in Moodle hochgeladen werden.</Info>
+                <Row label="Inhalt" desc="Username, Passwort, Vorname, Nachname, E-Mail, Kohorte, Kurs-Shorthand, Gruppe, Rolle, Einschreibedauer." />
+                <Row label="Kodierung" desc="UTF-8 mit BOM — für maximale Excel-Kompatibilität (Umlaute korrekt)." />
+                <Row label="Moodle-Upload" desc="Administration → Nutzer → Nutzer hochladen → CSV-Datei auswählen." />
               </HSection>
               <HSection icon={<FileDown size={14} />} title="PDF-Export (⌘P)">
-                <Info>Das PDF ist das Zugangsdaten-Dokument für das Institut. Es enthält pro Seite eine Klasse (oder die Trainer-Liste) mit allen Accounts im Tabellenformat.</Info>
-                <Row label="Format" desc="A4 Querformat (Landscape) — optimiert für viele Kursspalten nebeneinander." />
-                <Row label="Aufbau" desc="Seite 1 (optional): Trainer. Folgeseiten: Eine Seite pro Klasse mit Namen-Feld, Username, Passwort und allen zugewiesenen Kurslinks." />
+                <Info>Zugangsdaten-Dokument für das Institut. Pro Seite eine Klasse (oder Trainer-Liste) im Tabellenformat.</Info>
+                <Row label="Format" desc="A4 Querformat — optimiert für viele Kursspalten nebeneinander." />
                 <Row label="Kurslinks" desc="Kurs-Zellen im PDF sind klickbar — direkter Link zum jeweiligen Moodle-Kurs." />
-                <Row label="Dateiname" desc="EBCL-Zugangsdaten-{Institut}-{Datum}.pdf" />
+                <Row label="Leitfaden" desc="Optional: erste Seite enthält einen Leitfaden für das Institut (ein-/ausschaltbar in den Einstellungen)." />
+              </HSection>
+              <HSection icon={<TableIcon size={14} />} title="Excel-Export">
+                <Info>Identische Inhalte wie die CSV, aber im XLSX-Format mit Tabellenformatierung — übersichtlicher für manuelle Bearbeitung.</Info>
+                <Row label="Dateiname" desc="EBCL-Zugangsdaten-{Institut}-{Datum}.xlsx" />
+              </HSection>
+              <HSection icon={<Upload size={14} />} title="SharePoint-Upload">
+                <Info>Lädt CSV, PDF und Excel gleichzeitig in einen neuen SharePoint-Ordner hoch (via Power Automate Flow).</Info>
+                <Row label="Ordner" desc="Wird automatisch benannt: {Institut}_{Datum} — jedes Institut bekommt seinen eigenen Ordner." />
+                <Row label="Konfiguration" desc="Die Flow-URL wird in den Einstellungen → Backend hinterlegt und bleibt gespeichert." />
+                <Row label="Moodle-Upload" desc="Nach einer Moodle-Einschreibung wird statt der CSV eine TXT-Zusammenfassung hochgeladen (+ PDF + Excel)." />
               </HSection>
               <HSection icon={<ClipboardList size={14} />} title="Daten-Vorschau & History">
-                <Row label="Vorschau" desc="Nach dem Generieren zeigt 'Daten-Vorschau' alle Accounts in einer scrollbaren Tabelle — zur Kontrolle vor dem Export." />
-                <Row label="Export-History" desc="Jeder Export wird mit Zeitstempel, Dateiname und Accountanzahl in der History gespeichert (bleibt nach Neustart erhalten)." />
+                <Row label="Vorschau" desc="'Daten-Vorschau' zeigt nach dem Generieren alle Accounts in einer scrollbaren Tabelle zur Kontrolle vor dem Export." />
+                <Row label="Export-History" desc="Jeder Export wird mit Zeitstempel und Accountanzahl gespeichert und bleibt nach dem Neustart erhalten." />
+              </HSection>
+            </div>
+          )}
+
+          {/* ── MOODLE ── */}
+          {helpTab === 'moodle' && (
+            <div>
+              <HSection icon={<GraduationCap size={14} />} title="Direkte Moodle-Einschreibung">
+                <Info>Statt den CSV-Umweg zu nehmen können Accounts direkt über die Moodle REST API angelegt und eingeschrieben werden. Das gesamte Einschreibe-Ergebnis wird danach automatisch zu SharePoint hochgeladen.</Info>
+              </HSection>
+              <HSection icon={<Settings size={14} />} title="Einrichtung">
+                <Row label="Moodle URL" desc="Die Basis-URL deiner Moodle-Instanz, z.B. https://moodle.ebcl.at. Einstellungen → Backend." />
+                <Row label="API-Token" desc="Web Service Token aus Moodle: Administration → Website-Administration → Plugins → Web Services → Token verwalten." />
+                <Row label="Token-Sichtbarkeit" desc="Der Token kann über das Auge-Symbol in den Einstellungen ein-/ausgeblendet werden." />
+              </HSection>
+              <HSection icon={<ShieldCheck size={14} />} title="Erforderliche Moodle-Berechtigungen">
+                <Info>Der Web Service Token benötigt folgende Funktionen (External Service konfigurieren):</Info>
+                <div className="space-y-1">
+                  {[
+                    'core_user_create_users',
+                    'core_user_get_users_by_field',
+                    'enrol_manual_enrol_users',
+                    'core_group_create_groups',
+                    'core_group_get_course_groups',
+                    'core_group_add_group_members',
+                    'core_cohort_create_cohorts',
+                    'core_cohort_search_cohorts',
+                    'core_cohort_add_cohort_members',
+                  ].map(fn => (
+                    <div key={fn} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-3 py-1.5 rounded-lg border font-mono text-[10px]" >
+                      <span style={{ color: C.accent1 }}>{fn}</span>
+                    </div>
+                  ))}
+                </div>
+              </HSection>
+              <HSection icon={<Zap size={14} />} title="Was passiert beim Einschreiben?">
+                {[
+                  ['1', 'Nutzer prüfen',    'Bestehende Accounts werden per Username gesucht und wiederverwendet — keine Duplikate.'],
+                  ['2', 'Nutzer anlegen',   'Nur neue Accounts werden erstellt. Bei Fehler wird auf Einzel-Anlage zurückgefallen.'],
+                  ['3', 'Gruppen',          'Pro Kurs und Klasse wird eine Gruppe angelegt (falls nicht vorhanden). Trainer werden zu allen Gruppen hinzugefügt.'],
+                  ['4', 'Einschreiben',     'Schüler → zugewiesene Kurse (Rolle: Student). Trainer → alle Kurse (Rolle: Lehrbeauftragter). Mit Zeitraum.'],
+                  ['5', 'Kohorte',          'Eine System-Kohorte mit dem Institutsnamen wird angelegt oder gefunden. Alle Accounts werden zugeordnet.'],
+                ].map(([n, title, desc]) => (
+                  <div key={n} className="flex gap-3 items-start">
+                    <span style={{ color: '#7C3AED', backgroundColor: '#7C3AED18', borderColor: '#7C3AED30' }} className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
+                    <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
+                  </div>
+                ))}
+              </HSection>
+              <HSection icon={<AlertTriangle size={14} />} title="Wichtige Hinweise">
+                <Row label="Bestätigung" desc="Vor jeder Einschreibung erscheint ein Bestätigungs-Popup — als Schutz vor versehentlichem Ausführen." />
+                <Row label="Kurs-ID" desc="Jeder Kurs im Pool muss eine numerische Moodle-ID haben, sonst wird er beim Einschreiben übersprungen." />
+                <Row label="Fehleranalyse" desc="Bei Problemen die Entwicklerkonsole öffnen (Einstellungen → Allgemein → Entwicklerkonsole). Alle API-Aufrufe werden dort geloggt." />
+                <Row label="SharePoint" desc="Nach erfolgreicher Einschreibung wird eine TXT-Zusammenfassung (+ PDF + Excel) automatisch zu SharePoint hochgeladen." />
+              </HSection>
+            </div>
+          )}
+
+          {/* ── ZOHO CRM ── */}
+          {helpTab === 'zoho' && (
+            <div>
+              <HSection icon={<Users size={14} />} title="Zoho CRM Integration">
+                <Info>Nach jeder erfolgreichen Moodle-Einschreibung wird automatisch ein Abschluss (Deal) im Zoho CRM beim jeweiligen Account hinterlegt. Die Integration ist aktiv sobald Client ID, Client Secret und Refresh Token gesetzt sind.</Info>
+              </HSection>
+              <HSection icon={<Settings size={14} />} title="Einrichtung (Einstellungen → Backend)">
+                <Row label="Client ID" desc="OAuth-App Client ID aus der Zoho API Console (api-console.zoho.eu)." />
+                <Row label="Client Secret" desc="OAuth-App Client Secret, ebenfalls aus der API Console." />
+                <Row label="Refresh Token" desc="Langlebiges Token für den API-Zugriff. Wird über den 'Token generieren'-Dialog erstellt." />
+                <Row label="Token generieren" desc="Öffnet ein Popup mit Anleitung. Grant Code aus der Zoho API Console einfügen → automatischer Austausch gegen einen Refresh Token." />
+              </HSection>
+              <HSection icon={<ShieldCheck size={14} />} title="Erforderliche OAuth-Scopes">
+                <Info>Beim Generieren des Grant Codes in der Zoho API Console folgende Scopes angeben:</Info>
+                <div className="space-y-1">
+                  {['ZohoCRM.modules.Accounts.READ','ZohoCRM.modules.Accounts.CREATE','ZohoCRM.modules.Deals.CREATE'].map(s => (
+                    <div key={s} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-3 py-1.5 rounded-lg border font-mono text-[10px]">
+                      <span style={{ color: C.accent1 }}>{s}</span>
+                    </div>
+                  ))}
+                </div>
+              </HSection>
+              <HSection icon={<Zap size={14} />} title="Was passiert beim Einschreiben?">
+                {[
+                  ['1', 'Account suchen',  'Der Institutsname wird exakt im CRM gesucht. Groß-/Kleinschreibung wird berücksichtigt.'],
+                  ['2', 'Account anlegen', 'Wird kein Account gefunden, wird automatisch einer angelegt — mit dem Tag "Institut".'],
+                  ['3', 'Deal erstellen',  'Ein Deal mit Name "Moodle Einschreibung – [Startdatum] – [Enddatum]" wird beim Account hinterlegt. Stage: Closed Won.'],
+                  ['4', 'Beschreibung',    'Der Deal enthält alle Einschreibedetails: Institut, Einschreibezeitraum, Nutzeranzahl, Gruppen, Kohorte, Kurse und Moodle-URL.'],
+                ].map(([n, title, desc]) => (
+                  <div key={n} className="flex gap-3 items-start">
+                    <span style={{ color: '#16a34a', backgroundColor: '#16a34a18', borderColor: '#16a34a30' }} className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
+                    <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
+                  </div>
+                ))}
+              </HSection>
+              <HSection icon={<Building2 size={14} />} title="Institutübersicht">
+                <Row label="CRM-Dropdown" desc="Das Institutsfeld zeigt beim Tippen automatisch passende CRM-Accounts als Vorschlag. Auswahl übernimmt den Namen direkt." />
+                <Row label="Institutübersicht" desc="Der Button unter 'Kursübersicht' öffnet eine durchsuchbare Liste aller CRM-Accounts. Über 'Übernehmen' wird ein Account als Institut gesetzt." />
+                <Row label="Leerzeichen" desc="Leerzeichen im Institutsnamen werden automatisch zu Bindestrichen umgewandelt (Moodle-Kompatibilität)." />
               </HSection>
             </div>
           )}
@@ -1231,15 +1523,16 @@ const App = () => {
                 </div>
               </HSection>
               <HSection icon={<Zap size={14} />} title="Tipps & Tricks">
-                <Row label="Offline arbeiten" desc="Der Kurs-Pool wird gecacht. Du kannst ohne Internet generieren und exportieren — solange der Cache vorhanden ist." />
-                <Row label="Favoriten nutzen" desc="Speichere häufig verwendete Institute als Favorit. Das Datum wird beim Laden automatisch auf heute gesetzt." />
-                <Row label="Alle zuweisen" desc="Bei gleicher Kursstruktur für alle Klassen: ⌘A spart alle Einzelklicks in der Matrix." />
-                <Row label="PDF direkt prüfen" desc="Daten-Vorschau (nach Generieren) zeigt alle Accounts bevor du exportierst — Tipp- oder Konfigurationsfehler früh erkennen." />
-                <Row label="Dark Mode" desc="Toggle in den Settings oder über den Mond/Sonne-Button in der Sidebar. Wird gespeichert." />
-                <Row label="Fenstergröße" desc="Das Fenster ist skalierbar. Die letzte Größe und Position wird beim nächsten Start automatisch wiederhergestellt." />
+                <Row label="Offline arbeiten" desc="Der Kurs-Pool wird gecacht. Generieren und Exportieren funktioniert ohne Internet — solange der Cache vorhanden ist." />
+                <Row label="Favoriten" desc="Häufig verwendete Institute als Favorit speichern. Das Datum wird beim Laden automatisch auf heute gesetzt." />
+                <Row label="Alle zuweisen" desc="Bei gleicher Kursstruktur für alle Klassen: ⌘⇧A spart alle Einzelklicks in der Matrix." />
+                <Row label="Daten-Vorschau" desc="Vor dem Export alle Accounts nochmal prüfen — Fehler früh erkennen." />
+                <Row label="Dark Mode" desc="Toggle über den Mond/Sonne-Button in der Sidebar oder in den Einstellungen. Wird dauerhaft gespeichert." />
+                <Row label="Fenstergröße" desc="Das Fenster ist skalierbar. Letzte Größe und Position werden beim nächsten Start wiederhergestellt." />
               </HSection>
               <HSection icon={<RefreshCw size={14} />} title="Updates">
-                <Info>Die App prüft beim Start automatisch ob eine neue Version verfügbar ist. Updates können direkt in den Settings installiert werden — kein manueller Download nötig.</Info>
+                <Info>Die App prüft beim Start automatisch auf neue Versionen. Bei einem verfügbaren Update erscheint ein Popup in der Bildschirmmitte. Nach dem Download startet die App automatisch neu.</Info>
+                <Row label="Manuell prüfen" desc="Einstellungen → Allgemein → 'Jetzt auf Updates prüfen'." />
               </HSection>
             </div>
           )}
@@ -1282,6 +1575,7 @@ const App = () => {
       { id: 'allgemein', label: 'Allgemein', icon: <Settings size={12} /> },
       { id: 'klassen',   label: 'Klassen',   icon: <GraduationCap size={12} /> },
       { id: 'backend',   label: 'Backend',   icon: <Upload size={12} /> },
+      { id: 'anpassen',  label: 'Anpassen',  icon: <Tag size={12} /> },
     ];
     return (
       <ModalShell C={C} maxW="max-w-lg">
@@ -1335,6 +1629,23 @@ const App = () => {
           {/* ── Klassen ───────────────────────────────────────────── */}
           {settingsTab === 'klassen' && <>
             <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><ShieldCheck size={14} /> Standard-Einschreibedauer</h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird beim App-Start und beim Laden von Favoriten als Einschreibedauer gesetzt.</p>
+              <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors flex items-center gap-3">
+                <input
+                  type="number" min="1" max="3650"
+                  value={config.defaultEnrolPeriod}
+                  onChange={e => {
+                    const v = Math.max(1, parseInt(e.target.value, 10) || 1);
+                    setConfig(p => ({ ...p, defaultEnrolPeriod: v, enrolPeriod: v }));
+                  }}
+                  style={{ color: C.main }}
+                  className="w-20 bg-transparent text-base font-bold outline-none"
+                />
+                <span style={{ color: C.muted }} className="text-[11px]">Tage</span>
+              </div>
+            </div>
+            <div>
               <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Users size={14} /> Klassengrößen</h4>
               <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
               <div className="grid grid-cols-2 gap-3">
@@ -1380,45 +1691,152 @@ const App = () => {
               </div>
             </div>
             <div className="mt-4">
-              <div className="flex items-center justify-between mb-1">
-                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
-                  <GraduationCap size={14} /> Moodle REST API
-                </h4>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                <GraduationCap size={14} /> Moodle REST API
+              </h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Token benötigt Berechtigungen für: core_user_create_users, enrol_manual_enrol_users, core_group_create_groups u.a.</p>
+              <div className="space-y-3">
+                <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                  <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">Moodle URL</label>
+                  <input type="text" value={config.moodleUrl}
+                    onChange={e => setConfig(p => ({ ...p, moodleUrl: e.target.value }))}
+                    placeholder="https://moodle.schule.at"
+                    style={{ color: C.text, backgroundColor: 'transparent' }}
+                    className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                </div>
+                <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">API-Token</label>
+                    <button onClick={() => setShowMoodleToken(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
+                      {showMoodleToken ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                  <input type={showMoodleToken ? 'text' : 'password'} value={config.moodleToken}
+                    onChange={e => setConfig(p => ({ ...p, moodleToken: e.target.value }))}
+                    placeholder="abc123def456…"
+                    style={{ color: C.text, backgroundColor: 'transparent' }}
+                    className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                </div>
+              </div>
+            </div>
+            <div className="mt-4">
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                <Users size={14} /> Zoho CRM
+              </h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Nach Moodle-Einschreibung wird automatisch eine Notiz im CRM hinterlegt. Aktiv sobald alle drei Felder befüllt sind.</p>
+              <div className="space-y-3">
+                {[
+                  { label: 'Client ID', key: 'zohoClientId', placeholder: '1000.XXXXXXXX' },
+                  { label: 'Client Secret', key: 'zohoClientSecret', placeholder: 'abc123…' },
+                ].map(f => (
+                  <div key={f.key} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
+                    <input type="text" value={config[f.key]}
+                      onChange={e => setConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                      placeholder={f.placeholder}
+                      style={{ color: C.text, backgroundColor: 'transparent' }}
+                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                  </div>
+                ))}
+                <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">Refresh Token</label>
+                    <button onClick={() => setShowZohoRefreshToken(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
+                      {showZohoRefreshToken ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                  <input type={showZohoRefreshToken ? 'text' : 'password'} value={config.zohoRefreshToken}
+                    onChange={e => setConfig(p => ({ ...p, zohoRefreshToken: e.target.value }))}
+                    placeholder="1000.XXXXXXXX…"
+                    style={{ color: C.text, backgroundColor: 'transparent' }}
+                    className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                </div>
+                <div className="flex items-center justify-between">
+                  {config.zohoRefreshToken
+                    ? <p style={{ color: '#16a34a' }} className="text-[9px] font-semibold flex items-center gap-1"><CheckCircle2 size={10} /> Refresh Token vorhanden</p>
+                    : <p style={{ color: C.muted }} className="text-[9px] opacity-60">Kein Refresh Token gesetzt.</p>
+                  }
+                  <button
+                    onClick={() => setShowZohoTokenModal(true)}
+                    style={{ borderColor: C.border, color: C.text }}
+                    className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5"
+                  >
+                    <Zap size={11} /> Token generieren
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </>}
+
+          {/* ── Anpassen ──────────────────────────────────────────── */}
+          {settingsTab === 'anpassen' && <>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                <Tag size={14} /> Akzentfarben
+              </h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-4 opacity-60">Diese 4 Farben werden für Kurs-Tags und Akzente verwendet. Tags wählen ihre Farbe automatisch per Zufall aus dieser Palette.</p>
+              <div className="space-y-3">
+                {(config.customAccents ?? DEFAULT_ACCENTS).map((color, i) => (
+                  <div key={i} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border flex items-center gap-3">
+                    <span style={{ backgroundColor: color }} className="w-8 h-8 rounded-lg shrink-0 shadow-sm" />
+                    <div className="flex-1">
+                      <p style={{ color: C.text }} className="text-[11px] font-semibold">Akzent {i + 1}</p>
+                      <p style={{ color: C.muted }} className="text-[9px] font-mono">{color}</p>
+                    </div>
+                    <input
+                      type="color"
+                      value={color}
+                      onChange={e => setConfig(p => { const a = [...(p.customAccents ?? DEFAULT_ACCENTS)]; a[i] = e.target.value; return { ...p, customAccents: a }; })}
+                      className="w-9 h-9 rounded-lg cursor-pointer border-0 p-0.5 bg-transparent"
+                    />
+                  </div>
+                ))}
                 <button
-                  onClick={() => setConfig(p => ({ ...p, moodleEnabled: !p.moodleEnabled }))}
-                  style={{ backgroundColor: config.moodleEnabled ? '#7C3AED' : C.border }}
-                  className="relative w-9 h-5 rounded-full transition-colors duration-200 shrink-0"
+                  onClick={() => setConfig(p => ({ ...p, customAccents: [...DEFAULT_ACCENTS] }))}
+                  style={{ color: C.muted, borderColor: C.border }}
+                  className="w-full border rounded-xl py-2 text-[9px] font-bold uppercase hover:opacity-70 transition-all flex items-center justify-center gap-1.5"
                 >
-                  <span style={{ transform: config.moodleEnabled ? 'translateX(16px)' : 'translateX(2px)' }} className="absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 block" />
+                  <RefreshCw size={10} /> Auf Standard zurücksetzen
                 </button>
               </div>
-              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Direktes Einschreiben via Moodle Web Services (experimentell). Token benötigt Berechtigungen für: core_user_create_users, enrol_manual_enrol_users, core_group_create_groups u.a.</p>
-              {config.moodleEnabled && (
-                <div className="space-y-3">
-                  <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">Moodle URL</label>
-                    <input type="text" value={config.moodleUrl}
-                      onChange={e => setConfig(p => ({ ...p, moodleUrl: e.target.value }))}
-                      placeholder="https://moodle.schule.at"
-                      style={{ color: C.text, backgroundColor: 'transparent' }}
-                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
-                  </div>
-                  <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">API-Token</label>
-                      <button onClick={() => setShowMoodleToken(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
-                        {showMoodleToken ? <EyeOff size={12} /> : <Eye size={12} />}
-                      </button>
-                    </div>
-                    <input type={showMoodleToken ? 'text' : 'password'} value={config.moodleToken}
-                      onChange={e => setConfig(p => ({ ...p, moodleToken: e.target.value }))}
-                      placeholder="abc123def456…"
-                      style={{ color: C.text, backgroundColor: 'transparent' }}
-                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+            </div>
+
+            {/* Tag-Zuordnung */}
+            {(() => {
+              const uniqueTags = [...new Set(courseDictionary.map(c => c.tag).filter(Boolean))].sort();
+              if (!uniqueTags.length) return null;
+              const palette = config.customAccents?.length ? config.customAccents : DEFAULT_ACCENTS;
+              return (
+                <div>
+                  <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                    <Tag size={14} /> Tag-Farben
+                  </h4>
+                  <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wähle für jeden Tag eine der 4 Akzentfarben.</p>
+                  <div className="space-y-2">
+                    {uniqueTags.map(tag => {
+                      const currentIdx = config.tagColorMap?.[tag] ?? null;
+                      return (
+                        <div key={tag} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border flex items-center gap-3">
+                          <span style={{ backgroundColor: getTagColor(tag), color: '#fff', minWidth: '60px' }} className="text-[8px] font-bold px-2 py-1 rounded text-center shrink-0">{tag}</span>
+                          <div className="flex gap-2 ml-auto">
+                            {palette.map((color, i) => (
+                              <button
+                                key={i}
+                                onClick={() => setConfig(p => ({ ...p, tagColorMap: { ...p.tagColorMap, [tag]: i } }))}
+                                style={{ backgroundColor: color, outline: currentIdx === i ? `2px solid ${color}` : 'none', outlineOffset: '2px', opacity: currentIdx === i ? 1 : 0.4 }}
+                                className="w-6 h-6 rounded-lg transition-all hover:opacity-100"
+                                title={`Akzent ${i + 1}`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
-              )}
-            </div>
+              );
+            })()}
           </>}
         </div>
         <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
@@ -1439,45 +1857,6 @@ const App = () => {
       </ModalShell>
     );
   };
-
-  const renderFavoritesModal = () => (
-    <ModalShell C={C} maxW="max-w-lg">
-      <ModalHeader C={C} icon={<Star size={18} />} title="Favoriten" sub={`${favorites.length} gespeicherte Institute`} onClose={() => setActiveModal(null)} iconBg="#B45309" />
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
-        {favorites.length === 0 ? (
-          <div className="py-12 text-center">
-            <StarOff size={32} style={{ color: C.muted }} className="mx-auto mb-3 opacity-30" />
-            <p style={{ color: C.muted }} className="text-sm">Noch keine Favoriten gespeichert.</p>
-            <p style={{ color: C.muted }} className="text-[11px] mt-1 opacity-60">Unten auf "Aktuell speichern" klicken.</p>
-          </div>
-        ) : favorites.map(fav => (
-          <div key={fav.id} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex items-center gap-3 p-3 rounded-2xl border hover:border-amber-300 transition-all">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 font-bold text-sm text-white" style={{ backgroundColor: '#B45309' }}>
-              {fav.name.charAt(0).toUpperCase()}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p style={{ color: C.text }} className="font-bold text-sm truncate">{fav.name}</p>
-              <div style={{ color: C.muted }} className="text-[9px] mt-1 space-y-0.5">
-                <p>
-                  {Object.entries(fav.config?.classCounts || {}).filter(([,v])=>v>0).map(([i,v])=>`${v}×${fav.config?.classSizes?.[i]||'?'}`).join(' · ')} Schüler · {fav.config?.trainerCount || 0} Trainer · {fav.config?.courseSlotCount || 0} Kurse
-                </p>
-                <p className="font-mono opacity-60">PW-S: {fav.config?.studentPwd || '—'} · PW-T: {fav.config?.trainerPwd || '—'}</p>
-                <p className="opacity-50">{fmtDate(new Date(fav.savedAt))}</p>
-              </div>
-            </div>
-            <button onClick={() => loadFavorite(fav)} style={{ backgroundColor: C.accent1 }} className="text-white text-[10px] font-bold uppercase px-3 py-1.5 rounded-lg hover:brightness-110 transition-all">Laden</button>
-            <button onClick={() => deleteFavorite(fav.id)} className="p-1.5 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"><Trash2 size={14} /></button>
-          </div>
-        ))}
-      </div>
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex justify-between items-center shrink-0">
-        <button onClick={saveFavorite} style={{ backgroundColor: '#B45309' }} className="text-white px-5 py-2.5 rounded-xl font-bold uppercase text-xs flex items-center gap-2 hover:brightness-110 active:scale-95 transition-all">
-          <Star size={14} /> Aktuell speichern
-        </button>
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-6 py-2.5 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all">Schließen</button>
-      </div>
-    </ModalShell>
-  );
 
   const renderHistoryModal = () => (
     <ModalShell C={C} maxW="max-w-3xl">
@@ -1530,14 +1909,15 @@ const App = () => {
       <div className="flex-1 overflow-auto" style={{ backgroundColor: C.card }}>
         <table className="w-full text-left border-collapse min-w-[600px]">
           <thead style={{ backgroundColor: C.subtle, borderColor: C.border }} className="sticky top-0 z-10 border-b text-[10px] font-semibold uppercase tracking-widest">
-            <tr>{['#', 'Kursname', 'Kürzel', 'Link'].map(h => <th key={h} style={{ color: C.muted }} className="px-5 py-3">{h}</th>)}</tr>
+            <tr>{['#', 'Tag', 'Kursname', 'Kürzel', 'Link'].map(h => <th key={h} style={{ color: C.muted }} className="px-5 py-3">{h}</th>)}</tr>
           </thead>
           <tbody style={{ borderColor: C.border }} className="divide-y text-[11px]">
-            {isLoadingPool ? <tr><td colSpan="4" className="px-5 py-8 text-center"><Loader2 size={20} style={{ color: C.muted }} className="animate-spin mx-auto" /></td></tr>
-              : courseDictionary.length === 0 ? <tr><td colSpan="4" style={{ color: C.muted }} className="px-5 py-8 text-center italic">Keine Kurse gefunden.</td></tr>
+            {isLoadingPool ? <tr><td colSpan="5" className="px-5 py-8 text-center"><Loader2 size={20} style={{ color: C.muted }} className="animate-spin mx-auto" /></td></tr>
+              : courseDictionary.length === 0 ? <tr><td colSpan="5" style={{ color: C.muted }} className="px-5 py-8 text-center italic">Keine Kurse gefunden.</td></tr>
               : courseDictionary.map((c, i) => (
                 <tr key={c.id} className="hover:bg-black/5 transition-colors">
                   <td style={{ color: C.muted }} className="px-5 py-3 font-mono text-[10px]">{i + 1}</td>
+                  <td style={{ minWidth: courseTagColWidth }} className="px-5 py-3 whitespace-nowrap">{c.tag ? <span style={{ backgroundColor: getTagColor(c.tag), color: '#fff' }} className="text-[8px] font-bold px-2 py-0.5 rounded">{c.tag}</span> : <span style={{ color: C.muted }} className="italic text-[10px]">–</span>}</td>
                   <td style={{ color: C.text }} className="px-5 py-3 font-semibold">{c.label}</td>
                   <td className="px-5 py-3"><span style={{ color: C.accent1, backgroundColor: C.accent1 + '1A' }} className="font-mono px-2 py-0.5 rounded text-[10px]">{c.shorthand}</span></td>
                   <td className="px-5 py-3">{c.url ? <a href={c.url} target="_blank" rel="noreferrer" style={{ color: C.accent1 }} className="hover:underline flex items-center gap-1">Öffnen <Eye size={12} /></a> : <span style={{ color: C.muted }} className="italic">Kein Link</span>}</td>
@@ -1548,6 +1928,140 @@ const App = () => {
       </div>
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-end">
         <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-6 py-2 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all">Schließen</button>
+      </div>
+    </ModalShell>
+  );
+
+  const renderInstitutePreviewModal = () => {
+    const filtered = instituteSearch.trim()
+      ? zohoAllAccounts.filter(a => a.Account_Name.toLowerCase().includes(instituteSearch.toLowerCase()))
+      : zohoAllAccounts;
+    return (
+      <ModalShell C={C} maxW="max-w-2xl" zIndex={105}>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-b flex flex-wrap justify-between items-center gap-4 shrink-0">
+          <div className="flex items-center gap-3">
+            <div style={{ backgroundColor: C.main }} className="p-2 text-white rounded-xl"><Building2 size={18} /></div>
+            <div>
+              <h3 style={{ color: C.text }} className="font-bold uppercase tracking-tight text-sm">Institutübersicht</h3>
+              <p style={{ color: C.muted }} className="text-[9px] mt-0.5">{zohoAllAccounts.length} Institute im CRM</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setZohoSearching(true); getAllZohoAccounts(config).then(setZohoAllAccounts).catch(() => {}).finally(() => setZohoSearching(false)); }}
+              disabled={zohoSearching}
+              style={{ color: C.accent2 }}
+              className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 rounded-lg text-xs font-bold uppercase hover:bg-emerald-100 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw size={14} className={zohoSearching ? 'animate-spin' : ''} /> Sync
+            </button>
+            <button onClick={() => setActiveModal(null)} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full"><X size={20} /></button>
+          </div>
+        </div>
+        <div style={{ backgroundColor: C.card, borderColor: C.border }} className="px-4 py-3 border-b">
+          <input
+            value={instituteSearch}
+            onChange={e => setInstituteSearch(e.target.value)}
+            placeholder="Institut suchen…"
+            style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }}
+            className="w-full px-3 py-2 border rounded-lg text-xs outline-none focus:ring-1"
+          />
+        </div>
+        <div className="flex-1 overflow-auto" style={{ backgroundColor: C.card }}>
+          {zohoSearching ? (
+            <div className="flex items-center justify-center py-12"><Loader2 size={20} style={{ color: C.muted }} className="animate-spin" /></div>
+          ) : filtered.length === 0 ? (
+            <p style={{ color: C.muted }} className="text-center py-12 italic text-sm">
+              {zohoAllAccounts.length === 0 ? 'Keine Accounts geladen. Zoho CRM konfiguriert?' : 'Keine Treffer.'}
+            </p>
+          ) : (
+            <table className="w-full text-left border-collapse">
+              <thead style={{ backgroundColor: C.subtle, borderColor: C.border }} className="sticky top-0 z-10 border-b text-[10px] font-semibold uppercase tracking-widest">
+                <tr>
+                  <th style={{ color: C.muted }} className="px-5 py-3">#</th>
+                  <th style={{ color: C.muted }} className="px-5 py-3">Institutname</th>
+                  <th style={{ color: C.muted }} className="px-5 py-3">Aktion</th>
+                </tr>
+              </thead>
+              <tbody style={{ borderColor: C.border }} className="divide-y text-[11px]">
+                {filtered.map((acc, i) => (
+                  <tr key={acc.id} className="hover:bg-black/5 transition-colors">
+                    <td style={{ color: C.muted }} className="px-5 py-3 font-mono text-[10px]">{i + 1}</td>
+                    <td style={{ color: C.text }} className="px-5 py-3 font-semibold">{acc.Account_Name}</td>
+                    <td className="px-5 py-3">
+                      <button
+                        onMouseDown={() => {
+                          setConfig(p => ({ ...p, institute: acc.Account_Name.replace(/\s+/g, '-') }));
+                          setZohoSelectedId(acc.id);
+                          setActiveModal(null);
+                        }}
+                        style={{ color: C.main, borderColor: C.main + '44' }}
+                        className="px-2.5 py-1 border rounded-lg text-[9px] font-bold uppercase hover:opacity-80 transition-all flex items-center gap-1"
+                      >
+                        <CheckCircle2 size={11} /> Übernehmen
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-end">
+          <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="text-white px-6 py-2 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all">Schließen</button>
+        </div>
+      </ModalShell>
+    );
+  };
+
+  const renderZohoTokenModal = () => (
+    <ModalShell C={C} maxW="max-w-lg" zIndex={120}>
+      <div style={{ backgroundColor: C.card, borderColor: C.border }} className="p-5 border-b flex items-center justify-between">
+        <h2 style={{ color: C.text }} className="font-bold text-sm flex items-center gap-2"><Zap size={15} /> Zoho Refresh Token generieren</h2>
+        <button onClick={() => setShowZohoTokenModal(false)} style={{ color: C.muted }} className="hover:opacity-60 transition-opacity"><X size={16} /></button>
+      </div>
+      <div style={{ backgroundColor: C.card }} className="p-5 space-y-4">
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 rounded-xl border space-y-1">
+          <p style={{ color: C.muted }} className="text-[9px] font-bold uppercase tracking-widest mb-2">Anleitung</p>
+          <p style={{ color: C.muted }} className="text-[9px] opacity-70 leading-relaxed">
+            1. <span className="font-mono">api-console.zoho.eu</span> → Self Client → Tab "Generate Code"<br />
+            2. Scopes: <span className="font-mono select-all">ZohoCRM.modules.Accounts.READ,ZohoCRM.modules.Accounts.CREATE,ZohoCRM.modules.Deals.CREATE</span><br />
+            3. Duration: 10 Minuten → "Create" → Code kopieren<br />
+            4. Code unten einfügen und "Generieren" klicken
+          </p>
+        </div>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border space-y-1.5">
+          <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block">Client ID</label>
+          <p style={{ color: C.text }} className="text-[10px] font-mono">{config.zohoClientId || <span className="opacity-40">–</span>}</p>
+        </div>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border space-y-1.5">
+          <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block">Client Secret</label>
+          <p style={{ color: C.text }} className="text-[10px] font-mono">{config.zohoClientSecret || <span className="opacity-40">–</span>}</p>
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={zohoGrantCode}
+            onChange={e => setZohoGrantCode(e.target.value)}
+            placeholder="Grant Code: 1000.xxxx…"
+            style={{ color: C.text, backgroundColor: C.subtle, borderColor: C.border }}
+            className="flex-1 px-3 py-2 border rounded-xl text-[10px] font-mono outline-none focus:border-blue-300 transition-colors"
+          />
+          <button
+            onClick={handleZohoTokenExchange}
+            disabled={isExchangingZohoToken || !zohoGrantCode.trim() || !config.zohoClientId || !config.zohoClientSecret}
+            style={{ backgroundColor: '#16a34a' }}
+            className="text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase disabled:opacity-50 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1.5 shrink-0"
+          >
+            {isExchangingZohoToken ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+            Generieren
+          </button>
+        </div>
+        {config.zohoRefreshToken && (
+          <p style={{ color: '#16a34a' }} className="text-[9px] font-semibold flex items-center gap-1">
+            <CheckCircle2 size={10} /> Refresh Token erfolgreich gespeichert
+          </p>
+        )}
       </div>
     </ModalShell>
   );
@@ -1598,19 +2112,33 @@ const App = () => {
           </div>
         </div>
       )}
-      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex gap-2">
-        {[
-          { disabled: isExportingPDF, onClick: downloadPDF, bg: C.accent1, icon: isExportingPDF ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />, label: 'PDF' },
-          { disabled: isExportingExcel, onClick: downloadExcel, bg: '#217346', icon: isExportingExcel ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />, label: 'Excel' },
-          { disabled: false, onClick: downloadCSV, bg: C.accent2, icon: <FileSpreadsheet size={14} />, label: 'CSV' },
-          { disabled: isUploadingSP || isExportingPDF, onClick: handleSharePointUpload, bg: '#0078d4', icon: isUploadingSP ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />, label: 'SharePoint' },
-          ...(config.moodleEnabled ? [{ disabled: isMoodleEnrolling || !config.moodleUrl || !config.moodleToken, onClick: () => setShowMoodleConfirm(true), bg: '#7C3AED', icon: isMoodleEnrolling ? <Loader2 size={14} className="animate-spin" /> : <GraduationCap size={14} />, label: isMoodleEnrolling ? 'Läuft…' : 'Moodle' }] : []),
-        ].map(btn => (
-          <button key={btn.label} disabled={btn.disabled} onClick={btn.onClick} style={{ backgroundColor: btn.bg }} className="flex-1 py-2.5 text-white rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center justify-center gap-1.5 text-xs disabled:opacity-50">
-            {btn.icon} {btn.label}
+      <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex flex-col gap-3">
+        {moodleProgress && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span style={{ color: moodleProgress.error ? '#ef4444' : moodleProgress.done ? '#16a34a' : '#7C3AED' }} className="text-[10px] font-semibold flex-1 pr-2">
+                {moodleProgress.done ? `✓ ${moodleProgress.label}` : moodleProgress.error ? `✕ ${moodleProgress.label}` : moodleProgress.label}
+              </span>
+              {!moodleProgress.error && <span style={{ color: C.muted }} className="text-[9px] font-bold shrink-0">{moodleProgress.pct}%</span>}
+            </div>
+            <div style={{ backgroundColor: C.border }} className="h-1.5 rounded-full overflow-hidden">
+              <div style={{ width: `${moodleProgress.pct}%`, backgroundColor: moodleProgress.error ? '#ef4444' : moodleProgress.done ? '#16a34a' : '#7C3AED', transition: 'width 0.4s ease, background-color 0.3s' }} className="h-full rounded-full" />
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <button
+            disabled={isMoodleEnrolling || !config.moodleUrl || !config.moodleToken}
+            onClick={() => setShowMoodleConfirm(true)}
+            style={{ backgroundColor: '#7C3AED' }}
+            className="flex-1 py-2.5 text-white rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm flex items-center justify-center gap-2 text-xs disabled:opacity-50"
+            title={!config.moodleUrl || !config.moodleToken ? 'Moodle-URL und Token in Einstellungen → Backend konfigurieren' : ''}
+          >
+            {isMoodleEnrolling ? <Loader2 size={14} className="animate-spin" /> : <GraduationCap size={14} />}
+            {isMoodleEnrolling ? 'Einschreiben läuft…' : 'Moodle einschreiben'}
           </button>
-        ))}
-        <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.main }} className="flex-1 py-2.5 text-white rounded-xl font-bold uppercase tracking-widest hover:brightness-110 active:scale-95 transition-all shadow-sm text-xs">Schließen</button>
+          <button onClick={() => setActiveModal(null)} style={{ borderColor: C.border, color: C.muted }} className="px-5 py-2.5 border rounded-xl font-bold uppercase tracking-widest hover:bg-black/5 active:scale-95 transition-all text-xs">Schließen</button>
+        </div>
       </div>
     </ModalShell>
   );
@@ -1625,29 +2153,101 @@ const App = () => {
 
       {activeModal === 'help' && renderHelpModal()}
       {activeModal === 'settings' && renderSettingsModal()}
-      {activeModal === 'favorites' && renderFavoritesModal()}
       {activeModal === 'history' && renderHistoryModal()}
       {activeModal === 'coursePreview' && renderCoursePreviewModal()}
+      {activeModal === 'institutePreview' && renderInstitutePreviewModal()}
+      {showZohoTokenModal && renderZohoTokenModal()}
       {activeModal === 'dataPreview' && renderDataPreviewModal()}
 
-      {/* UPDATE BANNER */}
-      {pendingUpdate && (
-        <div style={{ backgroundColor: C.accent1, borderColor: C.accent1 }} className="shrink-0 mb-3 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-4 text-white shadow-lg">
-          <div className="flex items-center gap-2.5 text-xs font-semibold">
-            <Zap size={15} className="shrink-0" />
-            <span>Update verfügbar: <span className="font-bold">v{pendingUpdate.version}</span></span>
-            {isInstalling && installProgress > 0 && (
-              <span className="opacity-70">({installProgress}%)</span>
-            )}
+      {/* MOODLE ERGEBNIS POPUP */}
+      {moodleResult && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm z-[400]">
+          <div style={{ backgroundColor: C.card, borderColor: C.border }} className="rounded-2xl shadow-2xl border p-7 max-w-sm w-full mx-4 flex flex-col gap-5">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 text-white text-xl" style={{ backgroundColor: '#16a34a' }}>✓</div>
+              <div>
+                <p style={{ color: C.text }} className="font-bold text-base">Fertig!</p>
+                <p style={{ color: C.muted }} className="text-[11px] mt-0.5">{config.institute}</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div className="flex items-start gap-3">
+                <span className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0 mt-0.5" style={{ backgroundColor: '#7C3AED' }}>✓</span>
+                <div>
+                  <p style={{ color: C.text }} className="text-[12px] font-semibold">Moodle eingeschrieben</p>
+                  <p style={{ color: C.muted }} className="text-[11px] mt-0.5">{moodleResult.moodleSummary}</p>
+                </div>
+              </div>
+              {moodleResult.sharepoint && (
+                <div className="flex items-start gap-3">
+                  <span className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0 mt-0.5" style={{ backgroundColor: '#0078d4' }}>✓</span>
+                  <div>
+                    <p style={{ color: C.text }} className="text-[12px] font-semibold">SharePoint hochgeladen</p>
+                    <p style={{ color: C.muted }} className="text-[11px] mt-0.5">PDF, Excel & Zusammenfassung gespeichert</p>
+                  </div>
+                </div>
+              )}
+              {moodleResult.zoho && (
+                <div className="flex items-start gap-3">
+                  <span className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0 mt-0.5" style={{ backgroundColor: '#B45309' }}>✓</span>
+                  <div>
+                    <p style={{ color: C.text }} className="text-[12px] font-semibold">CRM übertragen</p>
+                    <p style={{ color: C.muted }} className="text-[11px] mt-0.5">Abschluss im Zoho CRM hinterlegt</p>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button onClick={() => setMoodleResult(null)} style={{ backgroundColor: '#16a34a' }} className="w-full py-2.5 text-white rounded-xl font-bold text-sm hover:brightness-110 active:scale-95 transition-all">
+              Schließen
+            </button>
           </div>
-          <button
-            onClick={handleInstallUpdate}
-            disabled={isInstalling}
-            className="shrink-0 bg-white/20 hover:bg-white/30 disabled:opacity-50 px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all flex items-center gap-1.5 active:scale-95"
-          >
-            {isInstalling ? <Loader2 size={12} className="animate-spin" /> : <FileDown size={12} />}
-            {isInstalling ? `Installiere… ${installProgress}%` : 'Jetzt installieren'}
-          </button>
+        </div>
+      )}
+
+      {/* UPDATE POPUP */}
+      {pendingUpdate && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm z-[500]">
+          <div style={{ backgroundColor: C.card, borderColor: C.border }} className="rounded-2xl shadow-2xl border p-7 max-w-sm w-full mx-4 flex flex-col gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ backgroundColor: C.accent1 }}>
+                <Zap size={20} className="text-white" />
+              </div>
+              <div>
+                <p style={{ color: C.text }} className="font-bold text-sm">Update verfügbar</p>
+                <p style={{ color: C.muted }} className="text-[11px]">Version <span className="font-bold">{pendingUpdate.version}</span> ist bereit zur Installation</p>
+              </div>
+            </div>
+            {isInstalling && (
+              <div>
+                <div className="flex justify-between mb-1">
+                  <span style={{ color: C.muted }} className="text-[10px] font-semibold">Wird heruntergeladen…</span>
+                  <span style={{ color: C.muted }} className="text-[10px] font-bold">{installProgress}%</span>
+                </div>
+                <div style={{ backgroundColor: C.border }} className="h-1.5 rounded-full overflow-hidden">
+                  <div style={{ width: `${installProgress}%`, backgroundColor: C.accent1 }} className="h-full rounded-full transition-all duration-300" />
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setPendingUpdate(null)}
+                disabled={isInstalling}
+                style={{ borderColor: C.border, color: C.muted }}
+                className="border px-4 py-2 rounded-xl text-xs font-bold uppercase hover:bg-black/5 disabled:opacity-40 transition-all"
+              >
+                Später
+              </button>
+              <button
+                onClick={handleInstallUpdate}
+                disabled={isInstalling}
+                style={{ backgroundColor: C.accent1 }}
+                className="text-white px-5 py-2 rounded-xl text-xs font-bold uppercase hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all flex items-center gap-2"
+              >
+                {isInstalling ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />}
+                {isInstalling ? `Installiere…` : 'Jetzt installieren'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1705,16 +2305,34 @@ const App = () => {
               <button onClick={() => setActiveModal('coursePreview')} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2">
               <Eye size={16} /> Kursübersicht
             </button>
+            {zohoEnabled && (
+              <button onClick={() => { setInstituteSearch(''); setActiveModal('institutePreview'); }} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2 mt-2">
+                <Building2 size={16} /> Institutübersicht
+                {zohoAllAccounts.length > 0 && <span style={{ backgroundColor: C.main + '22', color: C.main }} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold">{zohoAllAccounts.length}</span>}
+              </button>
+            )}
 
-            <button
-              disabled={isLoadingPool || !courseDictionary.length || !config.institute?.trim() || !!isEnrolInvalid}
-              onClick={generateList}
-              style={{ backgroundColor: isEnrolInvalid ? '#B45309' : C.main }}
-              className="w-full py-3 text-white rounded-xl font-bold shadow-md mt-3 transition-all hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 group text-sm">
-              <Users size={16} className="group-hover:scale-110 transition-transform" /> Liste generieren
-              <kbd className="ml-1 opacity-40 text-[9px] font-mono">⌘G</kbd>
-            </button>
-            {isEnrolInvalid && (
+            {showGenerateConfirm ? (
+              <div style={{ backgroundColor: '#78350f18', borderColor: '#B45309' }} className="mt-3 p-3 rounded-xl border space-y-2">
+                <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide">Ungewöhnliche Werte:</p>
+                {unusualWarnings.map(w => <p key={w} className="text-[10px] text-amber-700">⚠ {w}</p>)}
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => generateList(true)} style={{ backgroundColor: '#B45309' }} className="flex-1 text-white text-[10px] font-bold py-1.5 rounded-lg hover:brightness-110 transition-all">Trotzdem generieren</button>
+                  <button onClick={() => setShowGenerateConfirm(false)} style={{ borderColor: C.border, color: C.muted }} className="flex-1 border text-[10px] font-bold py-1.5 rounded-lg hover:bg-black/5 transition-all">Abbrechen</button>
+                </div>
+              </div>
+            ) : (
+              <button
+                disabled={isLoadingPool || !courseDictionary.length || !config.institute?.trim() || !!isEnrolInvalid}
+                onClick={() => generateList()}
+                style={{ backgroundColor: isEnrolInvalid ? '#B45309' : unusualWarnings.length ? '#B45309' : C.main }}
+                className="w-full py-3 text-white rounded-xl font-bold shadow-md mt-3 transition-all hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 group text-sm">
+                <Users size={16} className="group-hover:scale-110 transition-transform" /> Liste generieren
+                {unusualWarnings.length > 0 && <AlertTriangle size={14} className="opacity-80" />}
+                <kbd className="ml-1 opacity-40 text-[9px] font-mono">⌘G</kbd>
+              </button>
+            )}
+            {isEnrolInvalid && !showGenerateConfirm && (
               <p className="text-[10px] font-medium text-center mt-1.5 text-amber-600">
                 {isEnrolInvalid === 'dauer' ? '⚠ Dauer (Tage) muss größer 0 sein.' : '⚠ Einschreibezeitraum liegt in der Vergangenheit.'}
               </p>
@@ -1724,29 +2342,55 @@ const App = () => {
               <ClipboardList size={14} /> Daten-Vorschau
             </button>
 
-            <div className="grid grid-cols-2 gap-2 pt-3 border-t mt-3" style={{ borderColor: C.border }}>
+            <div className="grid grid-cols-3 gap-2 pt-3 border-t mt-3" style={{ borderColor: C.border }}>
               <button disabled={!isGenerated || isExportingPDF} onClick={downloadPDF} style={{ backgroundColor: C.accent1 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
                 {isExportingPDF ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} PDF <kbd className="opacity-40 font-mono text-[8px]">⌘P</kbd>
               </button>
               <button disabled={!isGenerated || isExportingExcel} onClick={downloadExcel} style={{ backgroundColor: '#217346' }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
                 {isExportingExcel ? <Loader2 size={13} className="animate-spin" /> : <FileSpreadsheet size={13} />} Excel
               </button>
-              <button disabled={!isGenerated} onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-2">
+              <button disabled={!isGenerated} onClick={downloadCSV} style={{ backgroundColor: C.accent2 }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all">
                 <FileSpreadsheet size={13} /> CSV <kbd className="opacity-40 font-mono text-[8px]">⌘E</kbd>
               </button>
-              {config.moodleEnabled && (
-                <button
-                  disabled={!isGenerated || isMoodleEnrolling || !config.moodleUrl || !config.moodleToken}
-                  onClick={() => setShowMoodleConfirm(true)}
-                  style={{ backgroundColor: '#7C3AED' }}
-                  className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-2"
-                  title={!config.moodleUrl || !config.moodleToken ? 'Moodle-URL und Token in Einstellungen → Backend konfigurieren' : 'Direkt in Moodle einschreiben'}
-                >
-                  {isMoodleEnrolling ? <Loader2 size={13} className="animate-spin" /> : <GraduationCap size={13} />}
-                  {isMoodleEnrolling ? 'Einschreiben…' : 'Moodle einschreiben'}
-                </button>
-              )}
+              <button disabled={!isGenerated || isUploadingSP || isExportingPDF} onClick={handleSharePointUpload} style={{ backgroundColor: '#0078d4' }} className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-3">
+                {isUploadingSP ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} SharePoint
+              </button>
+              <button
+                disabled={!isGenerated || isMoodleEnrolling || !config.moodleUrl || !config.moodleToken}
+                onClick={() => setShowMoodleConfirm(true)}
+                style={{ backgroundColor: '#7C3AED' }}
+                className="py-2.5 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 hover:brightness-110 active:scale-95 disabled:opacity-40 uppercase tracking-widest transition-all col-span-3"
+                title={!config.moodleUrl || !config.moodleToken ? 'Moodle-URL und Token in Einstellungen → Backend konfigurieren' : 'Direkt in Moodle einschreiben'}
+              >
+                {isMoodleEnrolling ? <Loader2 size={13} className="animate-spin" /> : <GraduationCap size={13} />}
+                {isMoodleEnrolling ? 'Einschreiben…' : 'Moodle einschreiben'}
+              </button>
             </div>
+
+            {/* Moodle Fortschrittsbalken */}
+            {moodleProgress && (
+              <div className="mt-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span style={{ color: moodleProgress.error ? '#ef4444' : moodleProgress.done ? '#16a34a' : '#7C3AED' }} className="text-[10px] font-semibold leading-snug flex-1 pr-2">
+                    {moodleProgress.done ? `✓ ${moodleProgress.label}` : moodleProgress.error ? `✕ ${moodleProgress.label}` : moodleProgress.label}
+                  </span>
+                  {!moodleProgress.error && (
+                    <span style={{ color: C.muted }} className="text-[9px] font-bold shrink-0">{moodleProgress.pct}%</span>
+                  )}
+                </div>
+                <div style={{ backgroundColor: C.border }} className="h-1.5 rounded-full overflow-hidden">
+                  <div
+                    style={{
+                      width: `${moodleProgress.pct}%`,
+                      backgroundColor: moodleProgress.error ? '#ef4444' : moodleProgress.done ? '#16a34a' : '#7C3AED',
+                      transition: 'width 0.4s ease, background-color 0.3s',
+                    }}
+                    className="h-full rounded-full"
+                  />
+                </div>
+              </div>
+            )}
+
             {showSessionResetConfirm ? (
               <div className="flex items-center gap-2 mt-3 w-full">
                 <span className="text-[10px] text-rose-600 font-bold flex-1">Wirklich zurücksetzen?</span>
@@ -1772,7 +2416,6 @@ const App = () => {
             </div>
             <div className="grid grid-cols-2 gap-2 pt-3 border-t" style={{ borderColor: C.accent1 + '20' }}>
               {[
-                { icon: <Star size={12} />, label: 'Favoriten', modal: 'favorites', badge: favorites.length },
                 { icon: <History size={12} />, label: 'History', modal: 'history', badge: exportHistory.length },
                 { icon: <Settings size={12} />, label: 'Settings', modal: 'settings' },
                 { icon: <HelpCircle size={12} />, label: 'Hilfe', modal: 'help' },
@@ -1798,26 +2441,55 @@ const App = () => {
                 <h3 style={{ color: C.accent1 }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-3"><Building2 size={12} /> Organisation</h3>
                 <div className="space-y-3">
                   <div>
-                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1 ml-1">Institutsname</label>
-                    <div className="flex gap-1.5">
-                      <input name="institute" value={config.institute} onChange={handleInput} placeholder="z.B. Volkshochschule" style={{ backgroundColor: C.card, borderColor: config.institute?.trim() ? C.border : '#ef4444', color: C.text }} className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium focus:ring-1 outline-none shadow-sm transition-all placeholder:opacity-30" />
-                      <button
-                        onClick={saveFavorite}
-                        title="Als Favorit speichern"
-                        style={{ backgroundColor: '#B45309', flexShrink: 0 }}
-                        className="px-2.5 py-2 rounded-lg text-white hover:brightness-110 active:scale-95 transition-all shadow-sm"
-                      >
-                        <Star size={15} />
-                      </button>
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1 ml-1 flex items-center gap-2">
+                      Institutsname
+                      {zohoEnabled && zohoSearching && <Loader2 size={10} className="animate-spin opacity-50" />}
+                      {zohoEnabled && !zohoSearching && zohoSelectedId && <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full text-white" style={{ backgroundColor: '#16a34a' }}>CRM ✓</span>}
+                      {zohoEnabled && !zohoSearching && !zohoSelectedId && config.institute?.trim() && <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full text-white" style={{ backgroundColor: '#ea580c' }}>Neu</span>}
+                      {zohoEnabled && !zohoSearching && zohoAllAccounts.length > 0 && <span style={{ color: C.muted }} className="text-[8px]">{zohoAllAccounts.length} im CRM</span>}
+                    </label>
+                    <div className="flex gap-1.5 relative">
+                      <input
+                        name="institute"
+                        value={config.institute}
+                        onChange={e => { handleInput(e); setZohoSelectedId(null); setZohoDropdownOpen(true); }}
+                        onFocus={() => zohoEnabled && setZohoDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setZohoDropdownOpen(false), 150)}
+                        placeholder="z.B. Volkshochschule Wien"
+                        style={{ backgroundColor: C.card, borderColor: config.institute?.trim() ? C.border : '#ef4444', color: C.text }}
+                        className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium focus:ring-1 outline-none shadow-sm transition-all placeholder:opacity-30"
+                      />
+                      {zohoDropdownOpen && zohoEnabled && zohoSuggestions.length > 0 && (
+                        <div style={{ backgroundColor: C.card, borderColor: C.border }} className="absolute top-full left-0 right-0 mt-1 border rounded-xl shadow-xl z-50 overflow-hidden max-h-52 overflow-y-auto">
+                          {zohoSuggestions.map(acc => (
+                            <button
+                              key={acc.id}
+                              onMouseDown={() => {
+                                setConfig(p => ({ ...p, institute: acc.Account_Name.replace(/\s+/g, '-') }));
+                                setZohoSelectedId(acc.id);
+                                setZohoDropdownOpen(false);
+                              }}
+                              style={{ color: C.text, borderColor: C.border }}
+                              className="w-full text-left px-3 py-2 text-xs hover:bg-black/5 flex items-center gap-2 border-b last:border-b-0 transition-colors"
+                            >
+                              <CheckCircle2 size={12} style={{ color: '#16a34a' }} className="shrink-0" />
+                              {acc.Account_Name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    {[{ label: 'Trainer', name: 'trainerCount', col: C.main }, { label: 'Kurs Anzahl', name: 'courseSlotCount', col: C.accent1 }].map(f => (
-                      <div key={f.name} style={{ backgroundColor: C.card, borderColor: C.border }} className="p-2.5 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                        <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-1">{f.label}</label>
-                        <input type="number" min="0" max={f.name === 'courseSlotCount' ? 8 : undefined} name={f.name} value={config[f.name]} onChange={handleInput} style={{ color: f.col }} className="w-full bg-transparent text-sm font-semibold outline-none" />
-                      </div>
-                    ))}
+                    {[{ label: 'Trainer', name: 'trainerCount', col: C.main }, { label: 'Kurs Anzahl', name: 'courseSlotCount', col: C.accent1 }].map(f => {
+                      const warn = f.name === 'trainerCount' && config.trainerCount > 20;
+                      return (
+                        <div key={f.name} style={{ backgroundColor: C.card, borderColor: warn ? '#B45309' : C.border }} className="p-2.5 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                          <label style={{ color: warn ? '#B45309' : C.muted }} className="text-[8px] font-semibold uppercase block mb-1">{f.label}{warn ? ' ⚠' : ''}</label>
+                          <input type="number" min="0" max={f.name === 'courseSlotCount' ? 8 : undefined} name={f.name} value={config[f.name]} onChange={handleInput} style={{ color: warn ? '#B45309' : f.col }} className="w-full bg-transparent text-sm font-semibold outline-none" />
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -1853,8 +2525,10 @@ const App = () => {
                     <input name="enrolDate" type="date" value={config.enrolDate} onChange={handleInput} style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="w-full px-2.5 py-1.5 border rounded-lg text-xs font-medium outline-none shadow-sm focus:border-blue-300 transition-colors" />
                   </div>
                   <div className="space-y-1">
-                    <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase ml-1">Dauer (Tage)</label>
-                    <input name="enrolPeriod" type="number" min="0" value={config.enrolPeriod} onChange={handleInput} style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="w-full px-2.5 py-1.5 border rounded-lg text-xs font-medium outline-none shadow-sm focus:border-blue-300 transition-colors" />
+                    {(() => { const warnPeriod = parseInt(config.enrolPeriod, 10) > 730; return (<>
+                      <label style={{ color: warnPeriod ? '#B45309' : C.muted }} className="text-[8px] font-semibold uppercase ml-1">Dauer (Tage){warnPeriod ? ' ⚠' : ''}</label>
+                      <input name="enrolPeriod" type="number" min="1" value={config.enrolPeriod} onChange={handleInput} style={{ backgroundColor: C.card, borderColor: warnPeriod ? '#B45309' : C.border, color: warnPeriod ? '#B45309' : C.text }} className="w-full px-2.5 py-1.5 border rounded-lg text-xs font-medium outline-none shadow-sm focus:border-blue-300 transition-colors" />
+                    </>); })()}
                   </div>
                 </div>
                 <div className="space-y-1 mb-3">
@@ -1952,11 +2626,64 @@ const App = () => {
                             })()}
                           </div>
                           <div className="relative w-full">
-                            <select value={config.selectedPoolCourseIds[i] || 'none'} onChange={e => updateCourseSlot(i, e.target.value)} style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="w-full appearance-none border rounded-md pl-2 pr-6 py-1.5 text-[11px] font-medium outline-none cursor-pointer hover:border-blue-300 transition-all shadow-sm truncate">
-                              <option value="none">-- Nicht belegt --</option>
-                              {courseDictionary.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                            </select>
-                            <ChevronDown size={14} style={{ color: C.muted }} className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            {(() => {
+                              const selId = config.selectedPoolCourseIds[i] || 'none';
+                              const selCourse = courseDictionary.find(c => c.id === selId);
+                              const isOpen = openCourseSlot === i;
+                              const q = isOpen ? courseSlotSearch.toLowerCase() : '';
+                              const filtered = courseDictionary.filter(c =>
+                                !q || c.label.toLowerCase().includes(q) || c.shorthand.toLowerCase().includes(q) || c.tag.toLowerCase().includes(q)
+                              );
+                              return (
+                                <>
+                                  <button
+                                    onClick={() => { setOpenCourseSlot(isOpen ? null : i); setCourseSlotSearch(''); }}
+                                    onBlur={() => setTimeout(() => setOpenCourseSlot(null), 150)}
+                                    style={{ backgroundColor: C.card, borderColor: C.border, color: selCourse ? C.text : C.muted }}
+                                    className="w-full flex items-center gap-1.5 border rounded-md pl-2 pr-6 py-1.5 text-[11px] font-medium outline-none cursor-pointer hover:border-blue-300 transition-all shadow-sm text-left truncate"
+                                  >
+                                    {selCourse?.tag && <span style={{ backgroundColor: getTagColor(selCourse.tag), color: '#fff' }} className="text-[8px] font-bold px-1.5 py-0.5 rounded shrink-0">{selCourse.tag}</span>}
+                                    <span className="truncate">{selCourse ? selCourse.label : '– Nicht belegt –'}</span>
+                                  </button>
+                                  <ChevronDown size={14} style={{ color: C.muted }} className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                  {isOpen && (
+                                    <div style={{ backgroundColor: C.card, borderColor: C.border }} className="absolute top-full left-0 right-0 mt-1 border rounded-xl shadow-xl z-50 overflow-hidden">
+                                      <div style={{ borderColor: C.border }} className="p-1.5 border-b">
+                                        <input
+                                          autoFocus
+                                          value={courseSlotSearch}
+                                          onChange={e => setCourseSlotSearch(e.target.value)}
+                                          placeholder="Suchen…"
+                                          style={{ backgroundColor: C.subtle, color: C.text }}
+                                          className="w-full px-2 py-1 rounded-lg text-[10px] outline-none placeholder:opacity-40"
+                                        />
+                                      </div>
+                                      <div className="max-h-48 overflow-y-auto">
+                                        <button
+                                          onMouseDown={() => { updateCourseSlot(i, 'none'); setOpenCourseSlot(null); }}
+                                          style={{ color: C.muted, borderColor: C.border }}
+                                          className="w-full text-left px-3 py-2 text-[10px] hover:bg-black/5 border-b transition-colors italic"
+                                        >– Nicht belegt –</button>
+                                        {filtered.map(c => (
+                                          <button
+                                            key={c.id}
+                                            onMouseDown={() => { updateCourseSlot(i, c.id); setOpenCourseSlot(null); }}
+                                            style={{ color: C.text, borderColor: C.border, backgroundColor: selId === c.id ? getTagColor(c.tag) + '18' : undefined }}
+                                            className="w-full text-left px-3 py-2 text-[10px] hover:bg-black/5 border-b last:border-b-0 transition-colors flex items-center gap-2"
+                                          >
+                                            <span style={{ minWidth: courseTagColWidth }} className="shrink-0 flex">
+                                              {c.tag && <span style={{ backgroundColor: getTagColor(c.tag), color: '#fff' }} className="text-[8px] font-bold px-1.5 py-0.5 rounded">{c.tag}</span>}
+                                            </span>
+                                            <span className="truncate">{c.label}</span>
+                                          </button>
+                                        ))}
+                                        {filtered.length === 0 && <p style={{ color: C.muted }} className="px-3 py-3 text-[10px] italic">Keine Treffer</p>}
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         </div>
                       </th>

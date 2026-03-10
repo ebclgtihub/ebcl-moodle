@@ -122,7 +122,7 @@ export async function enrollInMoodle({
   getClassLabel,
   onProgress,
 }) {
-  const report = (msg) => onProgress?.(msg);
+  const report = (label, pct) => onProgress?.(label, pct);
 
   // ── Eingaben prüfen ────────────────────────────────────────────────────────
   if (!baseUrl?.trim()) throw new Error('Moodle-URL ist nicht konfiguriert (Einstellungen → Backend).');
@@ -146,14 +146,14 @@ export async function enrollInMoodle({
   const enrolEndTs = enrolDateTs + parseInt(config.enrolPeriod, 10) * 86400;
 
   // ── Schritt 1: User anlegen ────────────────────────────────────────────────
-  report(`Schritt 1/5: ${generatedData.length} Accounts anlegen…`);
+  report(`${generatedData.length} Accounts vorbereiten…`, 5);
 
   const usersPayload = generatedData.map(u => ({
-    username: u.user,
-    password: u.pw,
-    firstname: u.first,
-    lastname: u.last,
-    email: u.mail,
+    username: u.user?.trim().toLowerCase(),
+    password: u.pw?.trim(),
+    firstname: u.first?.trim(),
+    lastname: u.last?.trim(),
+    email: u.mail?.trim().toLowerCase(),
     auth: 'manual',
   }));
 
@@ -162,7 +162,7 @@ export async function enrollInMoodle({
   let usersCreated = 0;
 
   // ── Schritt 1a: Bereits bestehende User suchen ────────────────────────────
-  report(`Schritt 1/5: Bestehende User prüfen…`);
+  report('Bestehende Accounts prüfen…', 10);
   try {
     const existing = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', {
       field: 'username',
@@ -180,7 +180,7 @@ export async function enrollInMoodle({
   // ── Schritt 1b: Nur neue User anlegen ─────────────────────────────────────
   const toCreate = usersPayload.filter(u => !userIdMap[u.username]);
   if (toCreate.length > 0) {
-    report(`Schritt 1/5: ${toCreate.length} neue Accounts anlegen…`);
+    report(`${toCreate.length} neue Accounts anlegen…`, 20);
     try {
       const created = await callMoodle(baseUrl, token, 'core_user_create_users', { users: toCreate });
       console.log('[Moodle] core_user_create_users response:', created);
@@ -208,16 +208,16 @@ export async function enrollInMoodle({
 
   const resolvedCount = Object.keys(userIdMap).length;
   if (resolvedCount === 0) {
-    throw new Error('Keine Moodle-User-IDs erhalten — Bitte Konsole (F12) für Details prüfen.');
+    throw new Error('Kein Moodle-Account konnte angelegt werden. Bitte Moodle-URL und Token in den Einstellungen prüfen.');
   }
 
   // ── Schritt 2: Gruppen vorbereiten ─────────────────────────────────────────
-  report('Schritt 2/5: Gruppen vorbereiten…');
+  report('Klassen-Gruppen vorbereiten…', 40);
 
   // Klassen-Label-Map: classId (number) → vollständiger Gruppenname
   const classLabelById = {};
   classRows.forEach(r => {
-    classLabelById[r.id] = `${config.institute}-${getClassLabel(r)}`;
+    classLabelById[r.id] = `${config.institute?.trim()}-${getClassLabel(r)}`;
   });
 
   // Welche Gruppen werden benötigt? Pro Kurs eine Gruppe je Klasse, die diesen Kurs hat.
@@ -276,7 +276,7 @@ export async function enrollInMoodle({
   }
 
   // ── Schritt 3: Einschreibungen ─────────────────────────────────────────────
-  report('Schritt 3/5: Einschreibungen durchführen…');
+  report('Einschreibungen durchführen…', 55);
 
   const enrolments = [];
   generatedData.forEach(userData => {
@@ -315,7 +315,7 @@ export async function enrollInMoodle({
   }
 
   // ── Schritt 4: Gruppen zuordnen ────────────────────────────────────────────
-  report('Schritt 4/5: Gruppen zuordnen…');
+  report('Gruppen zuordnen…', 70);
 
   const groupMembers = [];
   generatedData.forEach(userData => {
@@ -351,43 +351,50 @@ export async function enrollInMoodle({
 
   // ── Schritt 5: Kohorte ────────────────────────────────────────────────────
   // Entspricht cohort1 = config.institute im CSV-Export
-  report('Schritt 5/5: Kohorte zuordnen…');
+  report('Kohorte einrichten…', 82);
 
   let cohortId = null;
-  const cohortName = config.institute;
+  let cohortCreated = false;
+  const cohortName = config.institute?.trim() ?? '';
+  // idnumber: keine Leerzeichen, keine Sonderzeichen
+  const cohortIdNumber = cohortName.replace(/\s+/g, '-').replace(/[^\w-]/g, '');
 
-  // Zuerst versuchen anzulegen (System-Kohorte)
+  // Erst suchen — nur anlegen wenn nicht vorhanden
   try {
-    const created = await callMoodle(baseUrl, token, 'core_cohort_create_cohorts', {
-      cohorts: [{
-        categorytype: { type: 'system', value: '' },
-        name: cohortName,
-        idnumber: cohortName,
-        description: '',
-      }],
+    const found = await callMoodle(baseUrl, token, 'core_cohort_search_cohorts', {
+      query: cohortName,
+      context: { contextlevel: 'system', instanceid: 0 },
+      includes: 'all',
+      limitfrom: 0,
+      limitnum: 50,
     });
-    if (Array.isArray(created) && created[0]?.id) {
-      cohortId = created[0].id;
+    const cohorts = found?.cohorts ?? found;
+    if (Array.isArray(cohorts)) {
+      const match = cohorts.find(
+        c => c.name === cohortName || c.idnumber === cohortIdNumber
+      );
+      if (match) cohortId = match.id;
     }
-  } catch {
-    // Kohorte existiert möglicherweise bereits — per Suche finden
+  } catch (e) {
+    warnings.push(`Kohorte-Suche fehlgeschlagen: ${e.message}`);
+  }
+
+  if (!cohortId) {
     try {
-      const found = await callMoodle(baseUrl, token, 'core_cohort_search_cohorts', {
-        query: cohortName,
-        context: { contextlevel: 'system', instanceid: 0 },
-        includes: 'all',
-        limitfrom: 0,
-        limitnum: 50,
+      const created = await callMoodle(baseUrl, token, 'core_cohort_create_cohorts', {
+        cohorts: [{
+          categorytype: { type: 'system', value: '' },
+          name: cohortName,
+          idnumber: cohortIdNumber,
+          description: '',
+        }],
       });
-      const cohorts = found?.cohorts ?? found;
-      if (Array.isArray(cohorts)) {
-        const match = cohorts.find(
-          c => c.name === cohortName || c.idnumber === cohortName
-        );
-        if (match) cohortId = match.id;
+      if (Array.isArray(created) && created[0]?.id) {
+        cohortId = created[0].id;
+        cohortCreated = true;
       }
     } catch (e) {
-      warnings.push(`Kohorte konnte nicht gefunden werden: ${e.message}`);
+      warnings.push(`Kohorte konnte nicht angelegt werden: ${e.message}`);
     }
   }
 
@@ -412,6 +419,10 @@ export async function enrollInMoodle({
     usersResolved: resolvedCount,
     enrolmentsDone: enrolments.length,
     groupsCreated: Object.keys(groupIdMap).length,
+    cohortName,
+    cohortId,
+    cohortCreated,
+    cohortMembersAdded: cohortId ? Object.keys(userIdMap).length : 0,
     warnings,
   };
 }
