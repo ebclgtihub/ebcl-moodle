@@ -54,7 +54,7 @@ const DEFAULT_CONFIG = {
   enrolPeriod: 180,
   defaultEnrolPeriod: 180,
   enrolDate: new Date().toISOString().split('T')[0],
-  classSizes: [2, 25, 30, 40],
+  classSizes: [20, 25, 30, 40],
   classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
   classNames: {},
   trainerCount: 2,
@@ -196,6 +196,8 @@ const App = () => {
   const [zohoSelectedId, setZohoSelectedId] = useState(null);
   const [instituteSearch, setInstituteSearch] = useState('');
   const [showZohoRefreshToken, setShowZohoRefreshToken] = useState(false);
+  const [showZohoClientId, setShowZohoClientId] = useState(false);
+  const [showZohoClientSecret, setShowZohoClientSecret] = useState(false);
   const [showZohoTokenModal, setShowZohoTokenModal] = useState(false);
   const [zohoGrantCode, setZohoGrantCode] = useState('');
   const [isExchangingZohoToken, setIsExchangingZohoToken] = useState(false);
@@ -1725,19 +1727,32 @@ const App = () => {
               </h4>
               <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Nach Moodle-Einschreibung wird automatisch eine Notiz im CRM hinterlegt. Aktiv sobald alle drei Felder befüllt sind.</p>
               <div className="space-y-3">
-                {[
-                  { label: 'Client ID', key: 'zohoClientId', placeholder: '1000.XXXXXXXX' },
-                  { label: 'Client Secret', key: 'zohoClientSecret', placeholder: 'abc123…' },
-                ].map(f => (
-                  <div key={f.key} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
-                    <input type="text" value={config[f.key]}
-                      onChange={e => setConfig(p => ({ ...p, [f.key]: e.target.value }))}
-                      placeholder={f.placeholder}
-                      style={{ color: C.text, backgroundColor: 'transparent' }}
-                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">Client ID</label>
+                    <button onClick={() => setShowZohoClientId(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
+                      {showZohoClientId ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
                   </div>
-                ))}
+                  <input type={showZohoClientId ? 'text' : 'password'} value={config.zohoClientId}
+                    onChange={e => setConfig(p => ({ ...p, zohoClientId: e.target.value }))}
+                    placeholder="1000.XXXXXXXX"
+                    style={{ color: C.text, backgroundColor: 'transparent' }}
+                    className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                </div>
+                <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">Client Secret</label>
+                    <button onClick={() => setShowZohoClientSecret(v => !v)} style={{ color: C.muted }} className="hover:opacity-70 transition-opacity">
+                      {showZohoClientSecret ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
+                  <input type={showZohoClientSecret ? 'text' : 'password'} value={config.zohoClientSecret}
+                    onChange={e => setConfig(p => ({ ...p, zohoClientSecret: e.target.value }))}
+                    placeholder="abc123…"
+                    style={{ color: C.text, backgroundColor: 'transparent' }}
+                    className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                </div>
                 <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
                   <div className="flex items-center justify-between mb-1.5">
                     <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">Refresh Token</label>
