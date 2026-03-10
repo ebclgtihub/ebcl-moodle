@@ -1,10 +1,16 @@
 # Release Notes
 
-## Unreleased
+## v1.0.0 - 2026-03-10
 
-- feat: Zoho CRM einbindung
-- feat: Tags 
-- fix: kleine änderungen 
+- feat: Zoho CRM Einbindung (Account-Suche, automatische Anlage mit "Institut"-Tag, Abschluss/Deal nach Einschreibung)
+- feat: Kurs-Tags mit farbiger Anzeige im Dropdown und Kursübersicht
+- feat: Anpassbare Akzentfarben und manuelle Tag-Farb-Zuweisung
+- feat: Moodle-Einschreibung mit Fortschrittsbalken und Ergebnis-Popup
+- feat: Chronologischer Upload-Ablauf (Moodle → SharePoint → Zoho) mit Abbruch bei Fehler
+- feat: Standard-Einschreibedauer in den Einstellungen konfigurierbar
+- feat: Bestätigung bei ungewöhnlichen Eingabewerten
+- fix: Robustheit und Fehlerbehandlung verbessert
+- fix: Favoriten-Funktion entfernt (durch CRM-Einbindung ersetzt)
 
 ---
 
