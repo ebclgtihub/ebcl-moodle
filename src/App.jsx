@@ -355,6 +355,28 @@ const App = () => {
         if (Array.isArray(customAccents) && customAccents.length) setConfig(p => ({ ...p, customAccents }));
         const tagColorMap = await store.get('tagColorMap');
         if (tagColorMap && typeof tagColorMap === 'object') setConfig(p => ({ ...p, tagColorMap }));
+        // ─── Migrations ───────────────────────────────────────────────────────
+        // v1.1.1: fix classSizes[0] = 2 → 20
+        setConfig(p => {
+          const s = p.classSizes;
+          if (Array.isArray(s) && s[0] === 2) {
+            const fixed = [20, ...s.slice(1)];
+            store.set('classSizes', fixed).then(() => store.save()).catch(() => {});
+            return { ...p, classSizes: fixed };
+          }
+          return p;
+        });
+        // v1.1.1: apply correct default accent colors if still at old default
+        setConfig(p => {
+          const oldDefault = ['#6366f1', '#0ea5e9', '#f59e0b', '#10b981'];
+          const isOldDefault = p.customAccents.every((c, i) => c === oldDefault[i]);
+          if (isOldDefault) {
+            const newAccents = DEFAULT_CONFIG.customAccents;
+            store.set('customAccents', newAccents).then(() => store.save()).catch(() => {});
+            return { ...p, customAccents: newAccents };
+          }
+          return p;
+        });
       } catch (e) {
         console.error('Store laden:', e);
         addToast('Einstellungen konnten nicht geladen werden.', 'error');
@@ -2653,7 +2675,6 @@ const App = () => {
                                 <>
                                   <button
                                     onClick={() => { setOpenCourseSlot(isOpen ? null : i); setCourseSlotSearch(''); }}
-                                    onBlur={() => setTimeout(() => setOpenCourseSlot(null), 150)}
                                     style={{ backgroundColor: C.card, borderColor: C.border, color: selCourse ? C.text : C.muted }}
                                     className="w-full flex items-center gap-1.5 border rounded-md pl-2 pr-6 py-1.5 text-[11px] font-medium outline-none cursor-pointer hover:border-blue-300 transition-all shadow-sm text-left truncate"
                                   >
@@ -2662,6 +2683,8 @@ const App = () => {
                                   </button>
                                   <ChevronDown size={14} style={{ color: C.muted }} className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                   {isOpen && (
+                                    <>
+                                    <div className="fixed inset-0 z-40" onClick={() => setOpenCourseSlot(null)} />
                                     <div style={{ backgroundColor: C.card, borderColor: C.border }} className="absolute top-full left-0 right-0 mt-1 border rounded-xl shadow-xl z-50 overflow-hidden">
                                       <div style={{ borderColor: C.border }} className="p-1.5 border-b">
                                         <input
@@ -2695,6 +2718,7 @@ const App = () => {
                                         {filtered.length === 0 && <p style={{ color: C.muted }} className="px-3 py-3 text-[10px] italic">Keine Treffer</p>}
                                       </div>
                                     </div>
+                                    </>
                                   )}
                                 </>
                               );
