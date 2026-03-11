@@ -1,5 +1,7 @@
 # Release Notes
 
+- fix: Ordner name
+
 ## v1.0.0 - 2026-03-10
 
 - feat: Zoho CRM Einbindung (Account-Suche, automatische Anlage mit "Institut"-Tag, Abschluss/Deal nach Einschreibung)

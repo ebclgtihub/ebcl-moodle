@@ -1065,7 +1065,7 @@ const App = () => {
     try {
       const dateStr = new Date().toISOString().split('T')[0];
       const instClean = config.institute.replace(/\s+/g, '_');
-      const folderName = `${instClean}_${dateStr}`;
+      const folderName = `${dateStr}_${instClean}`;
       const csvName = `EBCL-Moodle-Upload-${instClean}-${dateStr}.csv`;
       const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
       const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
@@ -1120,7 +1120,7 @@ const App = () => {
       const now = new Date();
       const dateStr = now.toISOString().split('T')[0];
       const instClean = config.institute.replace(/\s+/g, '_');
-      const folderName = `${instClean}_${dateStr}_Moodle`;
+      const folderName = `${dateStr}_${instClean}_Moodle`;
       const existingUsers = result.usersResolved - result.usersCreated;
       const cohortStatus = result.cohortId
         ? `${result.cohortName} (ID ${result.cohortId}, ${result.cohortCreated ? 'neu angelegt' : 'bereits vorhanden'}, ${result.cohortMembersAdded} Mitglieder)`

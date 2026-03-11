@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh run:*)",
+      "Bash(sed -i '' 's/\"\"version\"\": \"\"1.0.0\"\"/\"\"version\"\": \"\"1.2.0\"\"/g' package.json package-lock.json src-tauri/tauri.conf.json)",
+      "Bash(sed -i '' 's/^version = \"\"1.0.0\"\"/version = \"\"1.2.0\"\"/' src-tauri/Cargo.toml)"
+    ]
+  }
+}
