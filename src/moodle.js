@@ -426,3 +426,34 @@ export async function enrollInMoodle({
     warnings,
   };
 }
+
+/**
+ * Lädt alle Kursbereiche und Kurse direkt von der Moodle-Instanz.
+ * Gibt ein Array im gleichen Format wie der Power-Automate-Pool zurück:
+ * { id, label, shorthand, url, tag }
+ */
+export async function fetchMoodleCourses(baseUrl, token) {
+  const [categories, courses] = await Promise.all([
+    callMoodle(baseUrl, token, 'core_course_get_categories', {}),
+    callMoodle(baseUrl, token, 'core_course_get_courses', {}),
+  ]);
+
+  const catMap = {};
+  if (Array.isArray(categories)) categories.forEach(c => { catMap[c.id] = c.name; });
+
+  if (!Array.isArray(courses)) throw new Error('Keine Kurse von Moodle erhalten.');
+
+  const base = baseUrl.replace(/\/+$/, '');
+  return courses
+    .filter(c => c.id > 1) // ID 1 = Site Home überspringen
+    .map(c => {
+      const sh = (c.shortname || '').substring(0, 10) || String(c.fullname || '').replace(/[^A-Z0-9]/g, '').substring(0, 4) || String(c.id);
+      return {
+        id: String(c.id),
+        label: c.fullname || c.shortname || `Kurs ${c.id}`,
+        shorthand: sh,
+        url: `${base}/course/view.php?id=${c.id}`,
+        tag: catMap[c.categoryid] || '',
+      };
+    });
+}

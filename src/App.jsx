@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
-import { enrollInMoodle } from './moodle';
+import { enrollInMoodle, fetchMoodleCourses } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
@@ -16,7 +16,7 @@ import {
   Eye, X, RefreshCw, Info, Settings, HelpCircle, BookOpen,
   Zap, ClipboardList, ShieldCheck, GraduationCap, FileDown,
   Save, Wifi, WifiOff, Trash2, History,
-  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload, EyeOff, Tag
+  Moon, Sun, Keyboard, CheckSquare, Square, Edit3, Upload, EyeOff, Tag, FlaskConical
 } from 'lucide-react';
 
 /**
@@ -69,6 +69,8 @@ const DEFAULT_CONFIG = {
   zohoRefreshToken: 'ENTFERNT',
   customAccents: ['#ab0325', '#153d61', '#f59e0b', '#00664f'],
   tagColorMap: { 'Schule': 0, 'Test': 1 },
+  moodleBetaEnabled: false,
+  moodleBetaCourseIds: [],
 };
 
 
@@ -219,6 +221,9 @@ const App = () => {
   const [moodleResult, setMoodleResult] = useState(null); // null | { moodleSummary, sharepoint, zoho }
   const [appVersion, setAppVersion] = useState('...');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [allMoodleCourses, setAllMoodleCourses] = useState([]);
+  const [isLoadingMoodleCourses, setIsLoadingMoodleCourses] = useState(false);
+  const [moodleBetaSearch, setMoodleBetaSearch] = useState('');
 
   const [helpTab, setHelpTab] = useState('workflow');
   const [classNamesResetKey, setClassNamesResetKey] = useState(0);
@@ -355,6 +360,12 @@ const App = () => {
         if (Array.isArray(customAccents) && customAccents.length) setConfig(p => ({ ...p, customAccents }));
         const tagColorMap = await store.get('tagColorMap');
         if (tagColorMap && typeof tagColorMap === 'object') setConfig(p => ({ ...p, tagColorMap }));
+        const moodleBetaEnabled = await store.get('moodleBetaEnabled');
+        if (moodleBetaEnabled != null) setConfig(p => ({ ...p, moodleBetaEnabled: !!moodleBetaEnabled }));
+        const moodleBetaCourseIds = await store.get('moodleBetaCourseIds');
+        if (Array.isArray(moodleBetaCourseIds)) setConfig(p => ({ ...p, moodleBetaCourseIds }));
+        const moodleCoursesCache = await store.get('moodleCoursesCache');
+        if (Array.isArray(moodleCoursesCache) && moodleCoursesCache.length > 0) setAllMoodleCourses(moodleCoursesCache);
         // ─── Migrations ───────────────────────────────────────────────────────
         // v1.1.1: fix classSizes[0] = 2 → 20
         setConfig(p => {
@@ -412,6 +423,8 @@ const App = () => {
         await store.set('defaultEnrolPeriod', config.defaultEnrolPeriod);
         await store.set('customAccents', config.customAccents);
         await store.set('tagColorMap', config.tagColorMap);
+        await store.set('moodleBetaEnabled', config.moodleBetaEnabled);
+        await store.set('moodleBetaCourseIds', config.moodleBetaCourseIds);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -422,7 +435,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, isStoreLoaded]); // eslint-disable-line
+  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, isStoreLoaded]); // eslint-disable-line
 
   // ─── Zoho: Alle Accounts laden (einmalig wenn aktiviert) ──────────────────
   const zohoEnabled = !!(config.zohoClientId && config.zohoClientSecret && config.zohoRefreshToken);
@@ -502,6 +515,7 @@ const App = () => {
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
+    if (config.moodleBetaEnabled) return; // Beta-Modus: Kurse kommen direkt von Moodle
     setIsLoadingPool(true);
     try {
       const r = await fetch(config.courseApiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request: 'get_courses' }) });
@@ -538,6 +552,32 @@ const App = () => {
     finally { setIsLoadingPool(false); }
   }, [addToast]);
   useEffect(() => { fetchCoursePool(); }, [fetchCoursePool]);
+
+  // ─── Beta: Moodle Kurskatalog ─────────────────────────────────────────────
+  const fetchMoodleCoursesCatalog = useCallback(async () => {
+    if (!config.moodleUrl?.trim() || !config.moodleToken?.trim()) {
+      addToast('Moodle-URL und Token müssen in den Einstellungen hinterlegt sein.', 'error');
+      return;
+    }
+    setIsLoadingMoodleCourses(true);
+    try {
+      const courses = await fetchMoodleCourses(config.moodleUrl, config.moodleToken);
+      setAllMoodleCourses(courses);
+      store.set('moodleCoursesCache', courses).then(() => store.save()).catch(() => {});
+      addToast(`${courses.length} Kurse von Moodle geladen.`, 'success');
+    } catch (e) {
+      addToast(`Moodle-Kurse konnten nicht geladen werden: ${e.message}`, 'error');
+    } finally {
+      setIsLoadingMoodleCourses(false);
+    }
+  }, [config.moodleUrl, config.moodleToken, addToast]);
+
+  // Wenn Beta aktiv: courseDictionary = ausgewählte Moodle-Kurse
+  useEffect(() => {
+    if (!config.moodleBetaEnabled) return;
+    const selected = allMoodleCourses.filter(c => (config.moodleBetaCourseIds ?? []).includes(c.id));
+    setCourseDictionary(selected);
+  }, [config.moodleBetaEnabled, config.moodleBetaCourseIds, allMoodleCourses]);
 
   // ─── Berechnungen ─────────────────────────────────────────────────────────
   const activeMatrixCourses = useMemo(() =>
@@ -1802,6 +1842,110 @@ const App = () => {
                   </button>
                 </div>
               </div>
+            </div>
+
+            {/* ── Beta: Kurspool aus Moodle ──────────────────────── */}
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-1">
+                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                  <FlaskConical size={14} /> Kurspool aus Moodle
+                  <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold tracking-wide">BETA</span>
+                </h4>
+                <button
+                  onClick={() => {
+                    const newVal = !config.moodleBetaEnabled;
+                    setConfig(p => ({ ...p, moodleBetaEnabled: newVal }));
+                    if (!newVal) fetchCoursePool(); // Toggle OFF → Power Automate wiederherstellen
+                  }}
+                  style={{ backgroundColor: config.moodleBetaEnabled ? C.accent2 : C.border }}
+                  className="relative w-9 h-5 rounded-full transition-colors"
+                >
+                  <span style={{ backgroundColor: '#fff', transform: config.moodleBetaEnabled ? 'translateX(16px)' : 'translateX(2px)' }} className="absolute top-0.5 w-4 h-4 rounded-full shadow transition-transform block" />
+                </button>
+              </div>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">
+                {config.moodleBetaEnabled
+                  ? 'Kurse werden direkt von Moodle abgerufen. Wähle unten aus, welche Kurse in der Matrix-Dropdown erscheinen sollen.'
+                  : 'Wenn aktiv: Kursliste direkt von Moodle statt Power Automate. Power Automate bleibt weiterhin für SharePoint genutzt.'}
+              </p>
+              {config.moodleBetaEnabled && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={fetchMoodleCoursesCatalog}
+                      disabled={isLoadingMoodleCourses}
+                      style={{ color: C.accent2 }}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 rounded-lg text-xs font-bold uppercase hover:bg-emerald-100 disabled:opacity-50 transition-colors"
+                    >
+                      <RefreshCw size={14} className={isLoadingMoodleCourses ? 'animate-spin' : ''} />
+                      Kurse laden
+                    </button>
+                    {allMoodleCourses.length > 0 && (
+                      <span style={{ color: C.muted }} className="text-[10px]">
+                        {allMoodleCourses.length} Kurse verfügbar · <strong style={{ color: C.text }}>{(config.moodleBetaCourseIds ?? []).length} ausgewählt</strong>
+                      </span>
+                    )}
+                  </div>
+                  {allMoodleCourses.length > 0 && (
+                    <>
+                      <input
+                        type="text"
+                        value={moodleBetaSearch}
+                        onChange={e => setMoodleBetaSearch(e.target.value)}
+                        placeholder="Kurs suchen…"
+                        style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }}
+                        className="w-full px-3 py-2 rounded-lg border text-[11px] outline-none placeholder:opacity-40"
+                      />
+                      <div style={{ borderColor: C.border }} className="border rounded-xl overflow-auto max-h-72">
+                        {(() => {
+                          const search = moodleBetaSearch.toLowerCase();
+                          const filtered = allMoodleCourses.filter(c =>
+                            !search || c.label.toLowerCase().includes(search) || c.tag.toLowerCase().includes(search) || c.id.includes(search)
+                          );
+                          const groups = {};
+                          filtered.forEach(c => {
+                            const cat = c.tag || 'Ohne Kategorie';
+                            if (!groups[cat]) groups[cat] = [];
+                            groups[cat].push(c);
+                          });
+                          return Object.entries(groups).map(([cat, courses]) => (
+                            <div key={cat}>
+                              <div style={{ backgroundColor: C.subtle, color: C.muted, borderColor: C.border }} className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest border-b sticky top-0">
+                                {cat} <span className="opacity-50">({courses.length})</span>
+                              </div>
+                              {courses.map(c => {
+                                const selected = (config.moodleBetaCourseIds ?? []).includes(c.id);
+                                return (
+                                  <button
+                                    key={c.id}
+                                    onClick={() => {
+                                      const ids = config.moodleBetaCourseIds ?? [];
+                                      const newIds = selected ? ids.filter(id => id !== c.id) : [...ids, c.id];
+                                      setConfig(p => ({ ...p, moodleBetaCourseIds: newIds }));
+                                    }}
+                                    style={{ borderColor: C.border, backgroundColor: selected ? (C.accent2 + '15') : 'transparent' }}
+                                    className="w-full flex items-center gap-3 px-3 py-2 border-b last:border-0 hover:bg-black/5 transition-colors text-left"
+                                  >
+                                    <span style={{ color: selected ? C.accent2 : C.muted }}>
+                                      {selected ? <CheckSquare size={14} /> : <Square size={14} />}
+                                    </span>
+                                    <span style={{ color: C.muted }} className="text-[9px] font-mono w-10 shrink-0">#{c.id}</span>
+                                    <span style={{ color: C.text }} className="text-[11px] flex-1 font-medium">{c.label}</span>
+                                    <span style={{ color: C.muted }} className="text-[9px] font-mono">{c.shorthand}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </>
+                  )}
+                  {allMoodleCourses.length === 0 && !isLoadingMoodleCourses && (
+                    <p style={{ color: C.muted }} className="text-[10px] italic opacity-60">Noch keine Kurse geladen — klicke auf „Kurse laden".</p>
+                  )}
+                </div>
+              )}
             </div>
 
           </>}
