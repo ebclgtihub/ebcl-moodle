@@ -1,6 +1,7 @@
 # Release Notes
 
 - fix: Ordner name
+- feat: Moodle Kurs Übersicht
 
 ## v1.0.0 - 2026-03-10
 
