@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
-import { enrollInMoodle, fetchMoodleCourses } from './moodle';
+import { enrollInMoodle, fetchMoodleCourses, findMaxNumbers } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
@@ -60,6 +60,7 @@ const DEFAULT_CONFIG = {
   trainerCount: 2,
   courseSlotCount: 1,
   selectedPoolCourseIds: Array(8).fill('none'),
+  classCustomSizes: {},
   courseApiUrl: '***ENTFERNT***',
   sharepointUrl: '***ENTFERNT***',
   moodleUrl: 'https://world.ebcl.eu',
@@ -215,6 +216,10 @@ const App = () => {
   const [installProgress, setInstallProgress] = useState(0);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [settingsTab, setSettingsTab] = useState('allgemein');
+  const [enrolMode, setEnrolMode] = useState('update'); // 'update' | 'new'
+  const [isFindingMaxNumbers, setIsFindingMaxNumbers] = useState(false);
+  const [editingClassSizeId, setEditingClassSizeId] = useState(null);
+  const [editingClassSizeVal, setEditingClassSizeVal] = useState('');
   const [showSessionResetConfirm, setShowSessionResetConfirm] = useState(false);
   const [showGenerateConfirm, setShowGenerateConfirm] = useState(false);
   const [moodleProgress, setMoodleProgress] = useState(null); // null | { label, pct, done, error }
@@ -228,6 +233,7 @@ const App = () => {
   const [helpTab, setHelpTab] = useState('workflow');
   const [classNamesResetKey, setClassNamesResetKey] = useState(0);
   const saveTimeoutRef = useRef(null);
+  const classGroupOffsetRef = useRef(0);
   const toastIdRef = useRef(0);
   const generateRef = useRef(null);
   const csvRef = useRef(null);
@@ -366,6 +372,10 @@ const App = () => {
         if (Array.isArray(moodleBetaCourseIds)) setConfig(p => ({ ...p, moodleBetaCourseIds }));
         const moodleCoursesCache = await store.get('moodleCoursesCache');
         if (Array.isArray(moodleCoursesCache) && moodleCoursesCache.length > 0) setAllMoodleCourses(moodleCoursesCache);
+        const classCustomSizes = await store.get('classCustomSizes');
+        if (classCustomSizes && typeof classCustomSizes === 'object') setConfig(p => ({ ...p, classCustomSizes }));
+        const savedEnrolMode = await store.get('enrolMode');
+        if (savedEnrolMode === 'update' || savedEnrolMode === 'new') setEnrolMode(savedEnrolMode);
         // ─── Migrations ───────────────────────────────────────────────────────
         // v1.1.1: fix classSizes[0] = 2 → 20
         setConfig(p => {
@@ -425,6 +435,8 @@ const App = () => {
         await store.set('tagColorMap', config.tagColorMap);
         await store.set('moodleBetaEnabled', config.moodleBetaEnabled);
         await store.set('moodleBetaCourseIds', config.moodleBetaCourseIds);
+        await store.set('classCustomSizes', config.classCustomSizes);
+        await store.set('enrolMode', enrolMode);
         await store.save();
         setLastSavedAt(new Date(now));
         setSaveStatus('saved');
@@ -435,7 +447,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, isStoreLoaded]); // eslint-disable-line
+  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, config.classCustomSizes, enrolMode, isStoreLoaded]); // eslint-disable-line
 
   // ─── Zoho: Alle Accounts laden (einmalig wenn aktiviert) ──────────────────
   const zohoEnabled = !!(config.zohoClientId && config.zohoClientSecret && config.zohoRefreshToken);
@@ -594,9 +606,16 @@ const App = () => {
 
   const classRows = useMemo(() => {
     const rows = []; let id = 1;
-    [0, 1, 2, 3].forEach(idx => { for (let i = 0; i < config.classCounts[idx]; i++) rows.push({ id: id++, size: config.classSizes[idx], typeIdx: idx }); });
+    [0, 1, 2, 3].forEach(idx => {
+      for (let i = 0; i < config.classCounts[idx]; i++) {
+        const defaultSize = config.classSizes[idx];
+        const customSize = config.classCustomSizes?.[id];
+        const size = customSize != null ? customSize : defaultSize;
+        rows.push({ id: id++, size, typeIdx: idx, defaultSize });
+      }
+    });
     return rows;
-  }, [config.classCounts, config.classSizes]);
+  }, [config.classCounts, config.classSizes, config.classCustomSizes]);
 
   const rawEndDate = useMemo(() => {
     const d = new Date(config.enrolDate);
@@ -629,7 +648,9 @@ const App = () => {
 
   const getClassLabel = useCallback(row => {
     const n = config.classNames?.[row.id - 1]?.trim();
-    return n || `Klasse-${String(row.id).padStart(2, '0')}`;
+    if (n) return n;
+    const effectiveId = row.id + classGroupOffsetRef.current;
+    return `Klasse-${String(effectiveId).padStart(2, '0')}`;
   }, [config.classNames]);
 
   // ─── Handler ──────────────────────────────────────────────────────────────
@@ -657,6 +678,10 @@ const App = () => {
   const updateClassSize = useCallback((idx, val) => setConfig(p => { const s = [...p.classSizes]; s[idx] = Math.max(0, parseInt(val, 10) || 0); return { ...p, classSizes: s }; }), []);
   const updateClassCount = useCallback((idx, val) => setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) } })), []);
   const updateClassName = useCallback((rowIndex, val) => setConfig(p => ({ ...p, classNames: { ...p.classNames, [rowIndex]: val } })), []);
+  const updateCustomClassSize = useCallback((rowId, val) => {
+    const num = Math.max(0, parseInt(val, 10) || 0);
+    setConfig(p => ({ ...p, classCustomSizes: { ...p.classCustomSizes, [rowId]: num } }));
+  }, []);
   const toggleCourseAssignment = useCallback((classId, courseId) => {
     const sid = String(courseId);
     setClassMatrix(prev => { const cur = (prev[classId] || []).map(String); return { ...prev, [classId]: cur.includes(sid) ? cur.filter(x => x !== sid) : [...cur, sid] }; });
@@ -701,6 +726,7 @@ const App = () => {
   const handleFullReset = useCallback(async () => {
     setConfig(DEFAULT_CONFIG); setClassMatrix({}); setGeneratedData([]); setIsGenerated(false); setInvalidClassIds(new Set());
     setFavorites([]); setExportHistory([]);
+    classGroupOffsetRef.current = 0;
     setShowDeleteConfirm(false);
     try { await store.clear(); await store.save(); addToast('Alle Daten gelöscht.', 'success'); }
     catch { addToast('Reset fehlgeschlagen.', 'error'); }
@@ -717,6 +743,7 @@ const App = () => {
     setGeneratedData([]);
     setIsGenerated(false);
     setInvalidClassIds(new Set());
+    classGroupOffsetRef.current = 0;
     addToast('Neue Liste gestartet.', 'success');
   }, [addToast]);
 
@@ -730,7 +757,7 @@ const App = () => {
   }, [config.institute, generatedData]);
 
   // ─── Generierung ──────────────────────────────────────────────────────────
-  const generateList = useCallback((confirmed = false) => {
+  const generateList = useCallback(async (confirmed = false) => {
     if (!config.institute?.trim()) return addToast('Bitte Institutsnamen eingeben.', 'error');
     if (!classRows.length && !config.trainerCount) return addToast('Keine Klassen oder Trainer.', 'error');
     if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
@@ -744,11 +771,46 @@ const App = () => {
     });
     if (badIds.size) { setInvalidClassIds(badIds); return addToast(`${badIds.size} Klasse(n) ohne Kurszuweisung — rot markiert.`, 'error'); }
     setInvalidClassIds(new Set());
+
+    // ── Neu-Anlegen-Modus: höchste bestehende Nummern abfragen ───────────────
+    let studentOffset = 0;
+    let trainerOffset = 0;
+    let classOffset = 0;
+    if (enrolMode === 'new') {
+      if (!config.moodleUrl?.trim() || !config.moodleToken?.trim()) {
+        addToast('Neu-Anlegen: Moodle-URL und Token fehlen — starte bei 1.', 'info', 4000);
+      } else {
+        setIsFindingMaxNumbers(true);
+        try {
+          const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
+          const activeCourseIds = activeMatrixCourses.map(c => {
+            const numId = parseInt(String(c?.id ?? ''), 10);
+            if (!isNaN(numId) && numId > 0) return numId;
+            if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) return parseInt(m[1], 10); }
+            return null;
+          }).filter(Boolean);
+          const { maxStudent, maxTrainer, maxClass } = await findMaxNumbers(config.moodleUrl, config.moodleToken, instClean, activeCourseIds);
+          studentOffset = maxStudent;
+          trainerOffset = maxTrainer;
+          classOffset = maxClass;
+          if (maxStudent > 0 || maxTrainer > 0 || maxClass > 0)
+            addToast(`Neu-Anlegen: Starte bei Schüler ${maxStudent + 1}, Trainer ${maxTrainer + 1}, Klasse ${maxClass + 1}.`, 'success', 5000);
+        } catch (e) {
+          addToast(`Moodle-Abfrage fehlgeschlagen: ${e.message} — starte bei 1.`, 'error');
+        } finally {
+          setIsFindingMaxNumbers(false);
+        }
+      }
+    }
+
+    classGroupOffsetRef.current = classOffset;
     const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
     const data = [];
-    for (let t = 1; t <= config.trainerCount; t++)
-      data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${t}`, mail: `trainer${t}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
-    let sIdx = 1;
+    for (let t = 1; t <= config.trainerCount; t++) {
+      const tNum = trainerOffset + t;
+      data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${tNum}`, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+    }
+    let sIdx = studentOffset + 1;
     classRows.forEach(r => {
       const selIds = (classMatrix[r.id] || []).map(String);
       const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
@@ -760,7 +822,7 @@ const App = () => {
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
     addToast(`${data.length} Accounts generiert.`, 'success');
-  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast, unusualWarnings]);
+  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast, unusualWarnings, enrolMode]);
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
   const buildCsvBlob = useCallback(() => {
@@ -1141,6 +1203,7 @@ const App = () => {
         config,
         getClassLabel,
         onProgress: progress,
+        enrolMode,
       });
     } catch (e) {
       console.error('[Moodle] Fehler:', e);
@@ -1638,8 +1701,8 @@ const App = () => {
     const STABS = [
       { id: 'allgemein', label: 'Allgemein', icon: <Settings size={12} /> },
       { id: 'klassen',   label: 'Klassen',   icon: <GraduationCap size={12} /> },
-      { id: 'backend',   label: 'Backend',   icon: <Upload size={12} /> },
       { id: 'anpassen',  label: 'Anpassen',  icon: <Tag size={12} /> },
+      { id: 'backend',   label: 'Backend',   icon: <Upload size={12} /> },
     ];
     return (
       <ModalShell C={C} maxW="max-w-lg">
@@ -1844,18 +1907,21 @@ const App = () => {
               </div>
             </div>
 
-            {/* ── Beta: Kurspool aus Moodle ──────────────────────── */}
-            <div className="mt-4">
+          </>}
+
+          {/* ── Anpassen ──────────────────────────────────────────── */}
+          {settingsTab === 'anpassen' && <>
+            {/* ── Kurspool aus Moodle ──────────────────────────── */}
+            <div>
               <div className="flex items-center justify-between mb-1">
                 <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
                   <FlaskConical size={14} /> Kurspool aus Moodle
-                  <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold tracking-wide">BETA</span>
                 </h4>
                 <button
                   onClick={() => {
                     const newVal = !config.moodleBetaEnabled;
                     setConfig(p => ({ ...p, moodleBetaEnabled: newVal }));
-                    if (!newVal) fetchCoursePool(); // Toggle OFF → Power Automate wiederherstellen
+                    if (!newVal) fetchCoursePool();
                   }}
                   style={{ backgroundColor: config.moodleBetaEnabled ? C.accent2 : C.border }}
                   className="relative w-9 h-5 rounded-full transition-colors"
@@ -1948,41 +2014,6 @@ const App = () => {
               )}
             </div>
 
-          </>}
-
-          {/* ── Anpassen ──────────────────────────────────────────── */}
-          {settingsTab === 'anpassen' && <>
-            <div>
-              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
-                <Tag size={14} /> Akzentfarben
-              </h4>
-              <p style={{ color: C.muted }} className="text-[10px] mb-4 opacity-60">Diese 4 Farben werden für Kurs-Tags und Akzente verwendet. Tags wählen ihre Farbe automatisch per Zufall aus dieser Palette.</p>
-              <div className="space-y-3">
-                {(config.customAccents ?? DEFAULT_ACCENTS).map((color, i) => (
-                  <div key={i} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border flex items-center gap-3">
-                    <span style={{ backgroundColor: color }} className="w-8 h-8 rounded-lg shrink-0 shadow-sm" />
-                    <div className="flex-1">
-                      <p style={{ color: C.text }} className="text-[11px] font-semibold">Akzent {i + 1}</p>
-                      <p style={{ color: C.muted }} className="text-[9px] font-mono">{color}</p>
-                    </div>
-                    <input
-                      type="color"
-                      value={color}
-                      onChange={e => setConfig(p => { const a = [...(p.customAccents ?? DEFAULT_ACCENTS)]; a[i] = e.target.value; return { ...p, customAccents: a }; })}
-                      className="w-9 h-9 rounded-lg cursor-pointer border-0 p-0.5 bg-transparent"
-                    />
-                  </div>
-                ))}
-                <button
-                  onClick={() => setConfig(p => ({ ...p, customAccents: [...DEFAULT_ACCENTS] }))}
-                  style={{ color: C.muted, borderColor: C.border }}
-                  className="w-full border rounded-xl py-2 text-[9px] font-bold uppercase hover:opacity-70 transition-all flex items-center justify-center gap-1.5"
-                >
-                  <RefreshCw size={10} /> Auf Standard zurücksetzen
-                </button>
-              </div>
-            </div>
-
             {/* Tag-Zuordnung */}
             {(() => {
               const uniqueTags = [...new Set(courseDictionary.map(c => c.tag).filter(Boolean))].sort();
@@ -2018,6 +2049,38 @@ const App = () => {
                 </div>
               );
             })()}
+
+            {/* Akzentfarben */}
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                <Tag size={14} /> Akzentfarben
+              </h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-4 opacity-60">Diese 4 Farben werden für Kurs-Tags und Akzente verwendet. Tags wählen ihre Farbe automatisch per Zufall aus dieser Palette.</p>
+              <div className="space-y-3">
+                {(config.customAccents ?? DEFAULT_ACCENTS).map((color, i) => (
+                  <div key={i} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border flex items-center gap-3">
+                    <span style={{ backgroundColor: color }} className="w-8 h-8 rounded-lg shrink-0 shadow-sm" />
+                    <div className="flex-1">
+                      <p style={{ color: C.text }} className="text-[11px] font-semibold">Akzent {i + 1}</p>
+                      <p style={{ color: C.muted }} className="text-[9px] font-mono">{color}</p>
+                    </div>
+                    <input
+                      type="color"
+                      value={color}
+                      onChange={e => setConfig(p => { const a = [...(p.customAccents ?? DEFAULT_ACCENTS)]; a[i] = e.target.value; return { ...p, customAccents: a }; })}
+                      className="w-9 h-9 rounded-lg cursor-pointer border-0 p-0.5 bg-transparent"
+                    />
+                  </div>
+                ))}
+                <button
+                  onClick={() => setConfig(p => ({ ...p, customAccents: [...DEFAULT_ACCENTS] }))}
+                  style={{ color: C.muted, borderColor: C.border }}
+                  className="w-full border rounded-xl py-2 text-[9px] font-bold uppercase hover:opacity-70 transition-all flex items-center justify-center gap-1.5"
+                >
+                  <RefreshCw size={10} /> Auf Standard zurücksetzen
+                </button>
+              </div>
+            </div>
           </>}
         </div>
         <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-t flex justify-between items-center shrink-0">
@@ -2504,13 +2567,14 @@ const App = () => {
               </div>
             ) : (
               <button
-                disabled={isLoadingPool || !courseDictionary.length || !config.institute?.trim() || !!isEnrolInvalid}
+                disabled={isLoadingPool || isFindingMaxNumbers || !courseDictionary.length || !config.institute?.trim() || !!isEnrolInvalid}
                 onClick={() => generateList()}
                 style={{ backgroundColor: isEnrolInvalid ? '#B45309' : unusualWarnings.length ? '#B45309' : C.main }}
                 className="w-full py-3 text-white rounded-xl font-bold shadow-md mt-3 transition-all hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 group text-sm">
-                <Users size={16} className="group-hover:scale-110 transition-transform" /> Liste generieren
-                {unusualWarnings.length > 0 && <AlertTriangle size={14} className="opacity-80" />}
-                <kbd className="ml-1 opacity-40 text-[9px] font-mono">⌘G</kbd>
+                {isFindingMaxNumbers ? <Loader2 size={16} className="animate-spin" /> : <Users size={16} className="group-hover:scale-110 transition-transform" />}
+                {isFindingMaxNumbers ? 'Moodle abfragen…' : 'Liste generieren'}
+                {!isFindingMaxNumbers && unusualWarnings.length > 0 && <AlertTriangle size={14} className="opacity-80" />}
+                {!isFindingMaxNumbers && <kbd className="ml-1 opacity-40 text-[9px] font-mono">⌘G</kbd>}
               </button>
             )}
             {isEnrolInvalid && !showGenerateConfirm && (
@@ -2662,15 +2726,41 @@ const App = () => {
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    {[{ label: 'Trainer', name: 'trainerCount', col: C.main }, { label: 'Kurs Anzahl', name: 'courseSlotCount', col: C.accent1 }].map(f => {
-                      const warn = f.name === 'trainerCount' && config.trainerCount > 20;
+                    {(() => {
+                      const warn = config.trainerCount > 20;
                       return (
-                        <div key={f.name} style={{ backgroundColor: C.card, borderColor: warn ? '#B45309' : C.border }} className="p-2.5 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                          <label style={{ color: warn ? '#B45309' : C.muted }} className="text-[8px] font-semibold uppercase block mb-1">{f.label}{warn ? ' ⚠' : ''}</label>
-                          <input type="number" min="0" max={f.name === 'courseSlotCount' ? 8 : undefined} name={f.name} value={config[f.name]} onChange={handleInput} style={{ color: warn ? '#B45309' : f.col }} className="w-full bg-transparent text-sm font-semibold outline-none" />
+                        <div style={{ backgroundColor: C.card, borderColor: warn ? '#B45309' : C.border }} className="p-2.5 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                          <label style={{ color: warn ? '#B45309' : C.muted }} className="text-[8px] font-semibold uppercase block mb-1">Trainer{warn ? ' ⚠' : ''}</label>
+                          <input type="number" min="0" name="trainerCount" value={config.trainerCount} onChange={handleInput} style={{ color: warn ? '#B45309' : C.main }} className="w-full bg-transparent text-sm font-semibold outline-none" />
                         </div>
                       );
-                    })}
+                    })()}
+                    <div style={{ backgroundColor: C.card, borderColor: C.border }} className="p-2.5 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                      <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-1">Kurs Anzahl</label>
+                      <input type="number" min="1" name="courseSlotCount" value={config.courseSlotCount} onChange={handleInput} style={{ color: C.main }} className="w-full bg-transparent text-sm font-semibold outline-none" />
+                    </div>
+                  </div>
+                  {/* Aktualisieren / Neu anlegen */}
+                  <div>
+                    <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-1.5 ml-1">Modus</label>
+                    <div style={{ borderColor: C.border }} className="flex rounded-xl overflow-hidden border">
+                      {[{ id: 'update', label: 'Aktualisieren' }, { id: 'new', label: 'Neu anlegen' }].map(m => (
+                        <button
+                          key={m.id}
+                          onClick={() => setEnrolMode(m.id)}
+                          style={{
+                            backgroundColor: enrolMode === m.id ? (m.id === 'new' ? C.accent2 : C.accent1) : 'transparent',
+                            color: enrolMode === m.id ? '#fff' : C.muted,
+                          }}
+                          className="flex-1 py-1.5 text-[9px] font-bold uppercase tracking-wide transition-all"
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                    {enrolMode === 'new' && (
+                      <p style={{ color: C.accent2 }} className="text-[8px] mt-1 ml-1 leading-snug">Schüler/Trainer/Klassen werden fortlaufend nach bestehenden Einträgen nummeriert.</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2886,7 +2976,31 @@ const App = () => {
                             {isInvalid && <AlertTriangle size={11} className="text-rose-500 mb-0.5" />}
                             <span style={{ color: isInvalid ? '#BE123C' : C.text }} className="font-bold text-[11px] tracking-tight">K-{String(c.id).padStart(2, '0')}</span>
                             {customName && <span style={{ color: C.accent1, backgroundColor: C.accent1 + '15' }} className="text-[8px] font-bold px-1.5 py-0.5 rounded truncate max-w-[90px]">{customName}</span>}
-                            <span style={{ color: isInvalid ? '#BE123C' : C.muted, backgroundColor: isInvalid ? '#FEE2E2' : C.card, borderColor: isInvalid ? '#FECDD3' : C.border }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.size} Pl.</span>
+                            {editingClassSizeId === c.id ? (
+                              <input
+                                autoFocus
+                                type="number"
+                                min="0"
+                                value={editingClassSizeVal}
+                                onChange={e => setEditingClassSizeVal(e.target.value)}
+                                onBlur={() => { updateCustomClassSize(c.id, editingClassSizeVal); setEditingClassSizeId(null); }}
+                                onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') setEditingClassSizeId(null); }}
+                                style={{ color: C.main, borderColor: '#3b82f6' }}
+                                className="w-14 bg-transparent text-[10px] font-bold outline-none text-center border-b"
+                              />
+                            ) : (
+                              <div className="flex items-center gap-0.5">
+                                <span style={{ color: isInvalid ? '#BE123C' : C.muted, backgroundColor: isInvalid ? '#FEE2E2' : C.card, borderColor: isInvalid ? '#FECDD3' : C.border }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.size} Pl.</span>
+                                <button
+                                  onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.size)); }}
+                                  title="Schülerzahl bearbeiten"
+                                  style={{ color: config.classCustomSizes?.[c.id] != null ? '#3b82f6' : C.muted }}
+                                  className="p-0.5 hover:opacity-70 transition-opacity"
+                                >
+                                  <Edit3 size={9} />
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </td>
                         {Array.from({ length: config.courseSlotCount }).map((_, i) => {

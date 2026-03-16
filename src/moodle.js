@@ -121,6 +121,7 @@ export async function enrollInMoodle({
   config,
   getClassLabel,
   onProgress,
+  enrolMode = 'update',
 }) {
   const report = (label, pct) => onProgress?.(label, pct);
 
@@ -240,23 +241,28 @@ export async function enrollInMoodle({
     });
   });
 
-  const groupIdMap = {};   // `${courseid}:${name}` → groupId
+  const groupIdMap = {};          // `${courseid}:${name}` → groupId (aktuelle Session)
+  const allExistingGroupIds = []; // alle Gruppen-IDs aller Kurse (für Trainer im Neu-Anlegen-Modus)
+
+  const uniqueCourseIds = [...new Set(coursesWithIds.map(c => c.moodleId))];
+
+  // Bestehende Gruppen laden — immer (für Duplikat-Check + Neu-Anlegen-Trainer)
+  for (const courseid of uniqueCourseIds) {
+    try {
+      const existing = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid });
+      if (Array.isArray(existing)) {
+        const institutePrefix = (config.institute?.trim() || '').toLowerCase();
+        existing.forEach(g => {
+          const key = `${courseid}:${g.name}`;
+          if (groupsNeededMap.has(key)) groupIdMap[key] = g.id;
+          if (enrolMode === 'new' && g.name?.toLowerCase().startsWith(institutePrefix))
+            allExistingGroupIds.push(g.id);
+        });
+      }
+    } catch { /* non-fatal */ }
+  }
 
   if (groupsNeededMap.size > 0) {
-    // Bestehende Gruppen laden (um Duplikate zu vermeiden)
-    const uniqueCourseIds = [...new Set(coursesWithIds.map(c => c.moodleId))];
-    for (const courseid of uniqueCourseIds) {
-      try {
-        const existing = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid });
-        if (Array.isArray(existing)) {
-          existing.forEach(g => {
-            const key = `${courseid}:${g.name}`;
-            if (groupsNeededMap.has(key)) groupIdMap[key] = g.id;
-          });
-        }
-      } catch { /* non-fatal */ }
-    }
-
     // Fehlende Gruppen anlegen
     const toCreate = Array.from(groupsNeededMap.values()).filter(
       g => !groupIdMap[`${g.courseid}:${g.name}`]
@@ -267,7 +273,10 @@ export async function enrollInMoodle({
           groups: toCreate.map(g => ({ courseid: g.courseid, name: g.name, description: '' })),
         });
         if (Array.isArray(created)) {
-          created.forEach(g => { groupIdMap[`${g.courseid}:${g.name}`] = g.id; });
+          created.forEach(g => {
+            groupIdMap[`${g.courseid}:${g.name}`] = g.id;
+            if (enrolMode === 'new') allExistingGroupIds.push(g.id);
+          });
         }
       } catch (e) {
         warnings.push(`Gruppen konnten nicht alle angelegt werden: ${e.message}`);
@@ -324,7 +333,11 @@ export async function enrollInMoodle({
 
     if (userData.isT) {
       // Trainer: zu ALLEN Gruppen aller Kurse hinzufügen
-      Object.values(groupIdMap).forEach(groupId => {
+      // Im Neu-Anlegen-Modus auch bestehende Gruppen aus früheren Sessions
+      const trainerGroupIds = enrolMode === 'new'
+        ? [...new Set(allExistingGroupIds)]
+        : Object.values(groupIdMap);
+      trainerGroupIds.forEach(groupId => {
         groupMembers.push({ groupid: groupId, userid: userId });
       });
     } else {
@@ -425,6 +438,58 @@ export async function enrollInMoodle({
     cohortMembersAdded: cohortId ? Object.keys(userIdMap).length : 0,
     warnings,
   };
+}
+
+/**
+ * Ermittelt die höchsten vorhandenen Student/Trainer/Klassen-Nummern
+ * für ein Institut, damit bei "Neu anlegen" fortlaufend nummeriert werden kann.
+ */
+
+export async function findMaxNumbers(baseUrl, token, instClean, activeCourseIds = []) {
+  let maxStudent = 0;
+  let maxTrainer = 0;
+  let maxClass = 0;
+
+  // Single API call with all possible usernames.
+  // Students use 3-digit padding (001–999), trainers go up to 99 — both natural limits.
+  // One roundtrip is better than multiple batched calls.
+  try {
+    const candidates = [];
+    for (let i = 1; i <= 999; i++)
+      candidates.push(`${instClean}-student-${String(i).padStart(3, '0')}`);
+    for (let t = 1; t <= 99; t++)
+      candidates.push(`${instClean}-trainer-${t}`);
+
+    const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: candidates });
+    if (Array.isArray(found)) {
+      found.forEach(u => {
+        const sm = u.username?.match(/-student-(\d+)$/i);
+        if (sm) maxStudent = Math.max(maxStudent, parseInt(sm[1], 10));
+        const tm = u.username?.match(/-trainer-(\d+)$/i);
+        if (tm) maxTrainer = Math.max(maxTrainer, parseInt(tm[1], 10));
+      });
+    }
+  } catch (e) {
+    console.warn('[Moodle] findMaxNumbers: user lookup failed:', e.message);
+  }
+
+  // Find max class number across ALL active courses (classes may not appear in every course).
+  const numRe = /-(\d+)$/;
+  for (const courseid of activeCourseIds) {
+    try {
+      const groups = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid });
+      if (Array.isArray(groups)) {
+        groups.forEach(g => {
+          const match = g.name?.match(numRe);
+          if (match) maxClass = Math.max(maxClass, parseInt(match[1], 10));
+        });
+      }
+    } catch (e) {
+      console.warn('[Moodle] findMaxNumbers: group fetch failed:', e.message);
+    }
+  }
+
+  return { maxStudent, maxTrainer, maxClass };
 }
 
 /**
