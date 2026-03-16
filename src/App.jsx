@@ -372,8 +372,6 @@ const App = () => {
         if (Array.isArray(moodleBetaCourseIds)) setConfig(p => ({ ...p, moodleBetaCourseIds }));
         const moodleCoursesCache = await store.get('moodleCoursesCache');
         if (Array.isArray(moodleCoursesCache) && moodleCoursesCache.length > 0) setAllMoodleCourses(moodleCoursesCache);
-        const classCustomSizes = await store.get('classCustomSizes');
-        if (classCustomSizes && typeof classCustomSizes === 'object') setConfig(p => ({ ...p, classCustomSizes }));
         const savedEnrolMode = await store.get('enrolMode');
         if (savedEnrolMode === 'update' || savedEnrolMode === 'new') setEnrolMode(savedEnrolMode);
         // ─── Migrations ───────────────────────────────────────────────────────
@@ -435,7 +433,6 @@ const App = () => {
         await store.set('tagColorMap', config.tagColorMap);
         await store.set('moodleBetaEnabled', config.moodleBetaEnabled);
         await store.set('moodleBetaCourseIds', config.moodleBetaCourseIds);
-        await store.set('classCustomSizes', config.classCustomSizes);
         await store.set('enrolMode', enrolMode);
         await store.save();
         setLastSavedAt(new Date(now));
@@ -447,7 +444,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, config.classCustomSizes, enrolMode, isStoreLoaded]); // eslint-disable-line
+  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, enrolMode, isStoreLoaded]); // eslint-disable-line
 
   // ─── Zoho: Alle Accounts laden (einmalig wenn aktiviert) ──────────────────
   const zohoEnabled = !!(config.zohoClientId && config.zohoClientSecret && config.zohoRefreshToken);
@@ -676,7 +673,7 @@ const App = () => {
     setConfig(p => ({ ...p, enrolPeriod: Math.max(1, diff) }));
   }, [config.enrolDate]);
   const updateClassSize = useCallback((idx, val) => setConfig(p => { const s = [...p.classSizes]; s[idx] = Math.max(0, parseInt(val, 10) || 0); return { ...p, classSizes: s }; }), []);
-  const updateClassCount = useCallback((idx, val) => setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) } })), []);
+  const updateClassCount = useCallback((idx, val) => setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) }, classCustomSizes: {} })), []);
   const updateClassName = useCallback((rowIndex, val) => setConfig(p => ({ ...p, classNames: { ...p.classNames, [rowIndex]: val } })), []);
   const updateCustomClassSize = useCallback((rowId, val) => {
     const num = Math.max(0, parseInt(val, 10) || 0);
@@ -2999,6 +2996,16 @@ const App = () => {
                                 >
                                   <Edit3 size={9} />
                                 </button>
+                                {config.classCustomSizes?.[c.id] != null && (
+                                  <button
+                                    onClick={() => setConfig(p => { const s = { ...p.classCustomSizes }; delete s[c.id]; return { ...p, classCustomSizes: s }; })}
+                                    title="Custom-Größe zurücksetzen"
+                                    style={{ color: '#ef4444' }}
+                                    className="p-0.5 hover:opacity-70 transition-opacity"
+                                  >
+                                    <X size={9} />
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>

@@ -1,7 +1,21 @@
 # Release Notes
 
-- fix: Ordner name
-- feat: Moodle Kurs Übersicht
+## v1.5.0 - 2026-03-16
+
+- feat: **Neu-anlegen-Modus** — vor der Generierung werden bestehende Moodle-Accounts abgefragt; neue Schüler/Trainer/Klassen werden fortlaufend ab der höchsten existierenden Nummer angelegt (kein Überschreiben)
+- feat: **Bleistift-Button** in der Kurs-Matrix zum individuellen Anpassen der Schülerzahl pro Klasse; rotes X zum Zurücksetzen des Custom-Wertes
+- feat: **Kurspool** aus dem Backend-Tab in den Anpassungen-Tab verschoben, Beta-Tag entfernt
+- fix: Kurs-Anzahl (courseSlotCount) in der Organisation-Sektion wiederhergestellt
+- fix: Neue Trainer im Neu-anlegen-Modus werden nur in Gruppen des eigenen Instituts eingeschrieben
+- fix: Klassen-Offset wird aus allen aktiven Kursen ermittelt (nicht nur dem ersten)
+- fix: Custom-Klassengrößen werden nicht mehr dauerhaft gespeichert (nur Session-gültig)
+- chore: Anpassungen-Tab vor Backend-Tab; Reihenfolge im Tab: Kurspool → Tag-Farben → Akzentfarben
+
+## v1.2.0 - 2026-03-16
+
+- feat: Moodle Kursübersicht
+- feat: Moodle Kurskatalog-Browser in Einstellungen (Beta)
+- fix: Ordner-Name
 
 ## v1.0.0 - 2026-03-10
 
