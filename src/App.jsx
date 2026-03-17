@@ -656,7 +656,11 @@ const App = () => {
     const isNum = ['enrolPeriod', 'trainerCount', 'courseSlotCount'].includes(name);
     const isPwd = ['studentPwd', 'trainerPwd'].includes(name);
     const isInstitute = name === 'institute';
-    const processed = isPwd ? value.trim() : isInstitute ? value.replace(/\s+/g, '-') : value;
+    const replaceUmlauts = s => s
+      .replace(/Ä/g, 'Ae').replace(/Ö/g, 'Oe').replace(/Ü/g, 'Ue')
+      .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue')
+      .replace(/ß/g, 'ss');
+    const processed = isPwd ? value.trim() : isInstitute ? replaceUmlauts(value).replace(/\s+/g, '-') : value;
     const NUM_MIN = { trainerCount: 0, courseSlotCount: 1, enrolPeriod: 1 };
     setConfig(p => {
       if (isNum) {
