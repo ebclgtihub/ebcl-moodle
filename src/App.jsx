@@ -860,7 +860,15 @@ const App = () => {
       for (const r of existingRows) {
         const matrixIds = new Set((classMatrix[r.id] || []).map(String));
         const allCourseIds = new Set([...(r.existingCourseIds || []).map(String), ...matrixIds]);
-        const selCourses = [...allCourseIds].map(id => allKnownCourseMap.get(id)).filter(Boolean);
+        // Kurse aus allKnownCourseMap holen; falls nicht vorhanden (z.B. Moodle-ID nicht in
+        // courseDictionary), synthetisches Objekt mit numerischer Moodle-ID erstellen —
+        // extractMoodleCourseId in moodle.js kann parseInt(id) direkt verwenden.
+        const selCourses = [...allCourseIds].map(id => {
+          if (allKnownCourseMap.has(id)) return allKnownCourseMap.get(id);
+          const numId = parseInt(id, 10);
+          if (!isNaN(numId) && numId > 0) return { id: String(numId), label: `Kurs ${numId}`, shorthand: '', url: '', tag: '' };
+          return null;
+        }).filter(Boolean);
         const classLabel = r.groupName;
         try {
           const members = await fetchGroupMembers(config.moodleUrl, config.moodleToken, r.courseId, r.moodleGroupId);
