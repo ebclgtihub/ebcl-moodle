@@ -600,23 +600,11 @@ const App = () => {
   }, [config.moodleBetaEnabled, config.moodleBetaCourseIds, allMoodleCourses]);
 
   // ─── Berechnungen ─────────────────────────────────────────────────────────
-  const activeMatrixCourses = useMemo(() => {
-    const poolCourses = config.selectedPoolCourseIds.slice(0, config.courseSlotCount)
+  const baseMatrixCourses = useMemo(() =>
+    config.selectedPoolCourseIds.slice(0, config.courseSlotCount)
       .map(id => courseDictionary.find(c => String(c.id) === String(id)))
-      .filter(c => c && c.id !== 'none');
-
-    // Automatisch Kurse ausgewählter Klassen hinzufügen, die nicht im Pool stehen
-    const poolIds = new Set(poolCourses.map(c => String(c.id)));
-    const selectedRows = classRows.filter(r => r.isExisting && selectedMoodleGroupIds.has(r.moodleGroupId));
-    for (const row of selectedRows) {
-      for (const extId of (lockedClassCourseMap[row.id] || new Set())) {
-        if (poolIds.has(String(extId))) continue;
-        const course = courseDictionary.find(c => String(c.id) === String(extId));
-        if (course) { poolCourses.push(course); poolIds.add(String(extId)); }
-      }
-    }
-    return poolCourses;
-  }, [config.selectedPoolCourseIds, config.courseSlotCount, courseDictionary, classRows, lockedClassCourseMap, selectedMoodleGroupIds]);
+      .filter(c => c && c.id !== 'none'),
+    [config.selectedPoolCourseIds, config.courseSlotCount, courseDictionary]);
 
   const totals = useMemo(() => {
     let std = 0;
@@ -667,6 +655,21 @@ const App = () => {
   const endDateFormatted = rawEndDate.toLocaleDateString('de-DE');
 
   const totalStudents = useMemo(() => classRows.reduce((s, r) => s + r.size, 0), [classRows]);
+
+  // Kurse ausgewählter Klassen automatisch hinzufügen (auch wenn nicht im manuellen Pool)
+  const activeMatrixCourses = useMemo(() => {
+    const courses = [...baseMatrixCourses];
+    const ids = new Set(courses.map(c => String(c.id)));
+    const selectedRows = classRows.filter(r => r.isExisting && selectedMoodleGroupIds.has(r.moodleGroupId));
+    for (const row of selectedRows) {
+      for (const extId of (lockedClassCourseMap[row.id] || new Set())) {
+        if (ids.has(String(extId))) continue;
+        const course = courseDictionary.find(c => String(c.id) === String(extId));
+        if (course) { courses.push(course); ids.add(String(extId)); }
+      }
+    }
+    return courses;
+  }, [baseMatrixCourses, classRows, lockedClassCourseMap, selectedMoodleGroupIds, courseDictionary]);
 
   // Wenn classRows sich ändert (Klassenanzahl geändert), alle Klassen im Update-Modus selektieren
   useEffect(() => {
