@@ -626,17 +626,23 @@ const App = () => {
       return rows;
     };
     if ((enrolMode === 'update' || enrolMode === 'both') && moodleGroups.length > 0) {
-      const existingRows = moodleGroups.map((g, i) => ({
-        id: i + 1,
-        size: g.memberCount,
-        typeIdx: 0,
-        defaultSize: g.memberCount,
-        groupName: g.name,
-        moodleGroupId: g.id,
-        courseId: g.courseId,
-        existingCourseIds: g.existingCourseIds || [],
-        isExisting: true,
-      }));
+      const existingRows = moodleGroups.map((g, i) => {
+        const rowId = i + 1;
+        const customSize = config.classCustomSizes?.[rowId];
+        // Leere Gruppen (Nutzer manuell gelöscht): Custom-Größe erlaubt neue Schüler einzuschreiben
+        const size = g.memberCount === 0 && customSize != null ? customSize : g.memberCount;
+        return {
+          id: rowId,
+          size,
+          typeIdx: 0,
+          defaultSize: g.memberCount,
+          groupName: g.name,
+          moodleGroupId: g.id,
+          courseId: g.courseId,
+          existingCourseIds: g.existingCourseIds || [],
+          isExisting: true,
+        };
+      });
       if (enrolMode === 'both') {
         return [...existingRows, ...buildNewRows(existingRows.length + 1)];
       }
@@ -857,7 +863,10 @@ const App = () => {
 
       // --- Bestehende Klassen (aus Moodle-Gruppen) ---
       const existingRows = effectiveClassRows.filter(r => r.isExisting);
-      for (const r of existingRows) {
+      // Leere Gruppen mit Custom-Größe: neue Schüler generieren (wie neue Zeilen)
+      const emptyReuseRows = existingRows.filter(r => r.defaultSize === 0 && r.size > 0);
+      const nonEmptyExistingRows = existingRows.filter(r => !(r.defaultSize === 0 && r.size > 0));
+      for (const r of nonEmptyExistingRows) {
         const matrixIds = new Set((classMatrix[r.id] || []).map(String));
         const allCourseIds = new Set([...(r.existingCourseIds || []).map(String), ...matrixIds]);
         // Kurse aus allKnownCourseMap holen; falls nicht vorhanden (z.B. Moodle-ID nicht in
@@ -893,9 +902,10 @@ const App = () => {
         }
       }
 
-      // --- Neue Klassen (nur im 'both'-Modus) ---
+      // --- Neue Klassen (nur im 'both'-Modus) + leere wiederverwendete Gruppen ---
       const newRows = enrolMode === 'both' ? effectiveClassRows.filter(r => r.isNew) : [];
-      if (newRows.length > 0 || (enrolMode === 'both' && config.trainerCount > 0)) {
+      const rowsNeedingNewStudents = [...emptyReuseRows, ...newRows];
+      if (rowsNeedingNewStudents.length > 0 || (enrolMode === 'both' && config.trainerCount > 0)) {
         let studentOffset = 0, trainerOffset = 0;
         classGroupOffsetRef.current = moodleGroups.length;
         if (config.moodleUrl?.trim() && config.moodleToken?.trim()) {
@@ -914,19 +924,34 @@ const App = () => {
             setIsFindingMaxNumbers(false);
           }
         }
-        for (let t = 1; t <= config.trainerCount; t++) {
-          const tNum = trainerOffset + t;
-          const uname = `${instClean}-trainer-${tNum}`;
-          if (!usernameSet.has(uname)) {
-            usernameSet.add(uname);
-            data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: uname, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+        if (enrolMode === 'both') {
+          for (let t = 1; t <= config.trainerCount; t++) {
+            const tNum = trainerOffset + t;
+            const uname = `${instClean}-trainer-${tNum}`;
+            if (!usernameSet.has(uname)) {
+              usernameSet.add(uname);
+              data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: uname, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+            }
           }
         }
         let sIdx = studentOffset + 1;
-        for (const r of newRows) {
+        for (const r of rowsNeedingNewStudents) {
           const selIds = (classMatrix[r.id] || []).map(String);
-          const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
-          const classLabel = `${config.institute}-${getClassLabel(r)}`;
+          // Leere Wiederverwend.-Gruppen: bestehendem Gruppen-Namen direkt verwenden (moodle.js findet Gruppe via Name)
+          const classLabel = r.isExisting
+            ? r.groupName
+            : `${config.institute}-${getClassLabel(r)}`;
+          const selCourses = r.isExisting
+            ? (() => {
+                const allCIds = new Set([...(r.existingCourseIds || []).map(String), ...selIds]);
+                return [...allCIds].map(id => {
+                  if (allKnownCourseMap.has(id)) return allKnownCourseMap.get(id);
+                  const numId = parseInt(id, 10);
+                  if (!isNaN(numId) && numId > 0) return { id: String(numId), label: `Kurs ${numId}`, shorthand: '', url: '', tag: '' };
+                  return null;
+                }).filter(Boolean);
+              })()
+            : courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
           for (let i = 0; i < r.size; i++) {
             const id = String(sIdx++).padStart(3, '0');
             data.push({ cNum: String(r.id + classGroupOffsetRef.current).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
@@ -939,10 +964,11 @@ const App = () => {
       return;
     }
 
-    // ── Neu-Anlegen-Modus: höchste bestehende Nummern abfragen ───────────────
+    // ── Neu-Anlegen-Modus: höchste bestehende Nummern + leere Gruppen abfragen ─
     let studentOffset = 0;
     let trainerOffset = 0;
     let classOffset = 0;
+    let emptyGroupsQueue = []; // bestehende leere Gruppen → werden zuerst wiederverwendet
     if (enrolMode === 'new') {
       if (!config.moodleUrl?.trim() || !config.moodleToken?.trim()) {
         addToast('Neu-Anlegen: Moodle-URL und Token fehlen — starte bei 1.', 'info', 4000);
@@ -973,6 +999,15 @@ const App = () => {
             const more = orphanUsernames.length > 3 ? ` (+${orphanUsernames.length - 3} weitere)` : '';
             addToast(`⚠ ${orphanUsernames.length} Account(s) ohne Kurseinschreibung in Moodle gefunden: ${preview}${more}. Diese wurden bei der Nummerierung berücksichtigt — bitte in Moodle prüfen und ggf. löschen.`, 'warning', 12000);
           }
+          // Leere Gruppen laden — neue Schüler werden dort zuerst eingeschrieben
+          if (activeCourseIds.length > 0) {
+            try {
+              const allGroups = await fetchInstituteGroups(config.moodleUrl, config.moodleToken, config.institute, activeCourseIds);
+              emptyGroupsQueue = allGroups.filter(g => g.memberCount === 0).sort((a, b) => a.name.localeCompare(b.name));
+              if (emptyGroupsQueue.length > 0)
+                addToast(`${emptyGroupsQueue.length} leere Gruppe(n) gefunden — neue Schüler werden dort zuerst eingeschrieben.`, 'info', 5000);
+            } catch { /* nicht-kritisch */ }
+          }
         } catch (e) {
           addToast(`Moodle-Abfrage fehlgeschlagen: ${e.message} — starte bei 1.`, 'error');
         } finally {
@@ -989,10 +1024,14 @@ const App = () => {
       data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${tNum}`, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
     }
     let sIdx = studentOffset + 1;
+    let emptyGroupIdx = 0;
     effectiveClassRows.forEach(r => {
       const selIds = (classMatrix[r.id] || []).map(String);
       const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
-      const classLabel = `${config.institute}-${getClassLabel(r)}`;
+      // Leere bestehende Gruppe wiederverwenden, sonst neue Bezeichnung generieren
+      const classLabel = emptyGroupIdx < emptyGroupsQueue.length
+        ? emptyGroupsQueue[emptyGroupIdx++].name
+        : `${config.institute}-${getClassLabel(r)}`;
       for (let i = 0; i < r.size; i++) {
         const id = String(sIdx++).padStart(3, '0');
         data.push({ cNum: String(r.id + classGroupOffsetRef.current).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
@@ -2608,9 +2647,15 @@ const App = () => {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <span style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="text-[10px] font-semibold px-2.5 py-1 rounded-full border flex items-center gap-1.5">
-                      <Users size={10} />{g.memberCount} Schüler
-                    </span>
+                    {g.memberCount === 0 ? (
+                      <span style={{ backgroundColor: '#fef3c7', borderColor: '#fcd34d', color: '#92400e' }} className="text-[10px] font-semibold px-2.5 py-1 rounded-full border flex items-center gap-1.5">
+                        <Users size={10} /> Leer
+                      </span>
+                    ) : (
+                      <span style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="text-[10px] font-semibold px-2.5 py-1 rounded-full border flex items-center gap-1.5">
+                        <Users size={10} />{g.memberCount} Schüler
+                      </span>
+                    )}
                     <span style={{ backgroundColor: isSelected ? C.accent1 + '20' : C.subtle, borderColor: isSelected ? C.accent1 : C.border, color: isSelected ? C.accent1 : C.muted }} className="text-[9px] font-bold px-2 py-1 rounded-full border uppercase">
                       {isSelected ? 'Ausgewählt' : 'Nicht ausgewählt'}
                     </span>
@@ -3637,16 +3682,16 @@ const App = () => {
                               />
                             ) : (
                               <div className="flex items-center gap-0.5">
-                                <span style={{ color: isInvalid ? '#BE123C' : C.muted, backgroundColor: isInvalid ? '#FEE2E2' : C.card, borderColor: isInvalid ? '#FECDD3' : C.border }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.size} Pl.</span>
-                                {!c.isExisting && <button
+                                <span style={{ color: isInvalid ? '#BE123C' : (c.isExisting && c.defaultSize === 0 ? '#92400e' : C.muted), backgroundColor: isInvalid ? '#FEE2E2' : (c.isExisting && c.defaultSize === 0 ? '#fef3c7' : C.card), borderColor: isInvalid ? '#FECDD3' : (c.isExisting && c.defaultSize === 0 ? '#fcd34d' : C.border) }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.isExisting && c.defaultSize === 0 && c.size === 0 ? 'Leer' : `${c.size} Pl.`}</span>
+                                {(!c.isExisting || c.defaultSize === 0) && <button
                                   onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.size)); }}
-                                  title="Schülerzahl bearbeiten"
+                                  title={c.isExisting ? 'Neue Schüler in leere Gruppe einschreiben' : 'Schülerzahl bearbeiten'}
                                   style={{ color: config.classCustomSizes?.[c.id] != null ? '#3b82f6' : C.muted }}
                                   className="p-0.5 hover:opacity-70 transition-opacity"
                                 >
                                   <Edit3 size={9} />
                                 </button>}
-                                {!c.isExisting && config.classCustomSizes?.[c.id] != null && (
+                                {(!c.isExisting || c.defaultSize === 0) && config.classCustomSizes?.[c.id] != null && (
                                   <button
                                     onClick={() => setConfig(p => { const s = { ...p.classCustomSizes }; delete s[c.id]; return { ...p, classCustomSizes: s }; })}
                                     title="Custom-Größe zurücksetzen"
