@@ -81,6 +81,34 @@ async function callMoodle(baseUrl, token, wsfunction, params = {}) {
 }
 
 /**
+ * Teilt ein Array in Chunks der Größe n auf und verarbeitet alle parallel.
+ * Gibt ein flaches Array aller Ergebnisse zurück.
+ */
+async function chunkedParallel(items, chunkSize, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    const chunkResults = await Promise.all(chunk.map(fn));
+    results.push(...chunkResults);
+  }
+  return results;
+}
+
+/**
+ * Ruft eine Moodle-API mit einer Liste von Items in Batches auf.
+ * chunkSize so wählen dass POST-Parameter < max_input_vars (Standard 1000).
+ */
+async function batchedCall(baseUrl, token, wsfunction, itemsKey, items, chunkSize = 200) {
+  const results = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    const res = await callMoodle(baseUrl, token, wsfunction, { [itemsKey]: chunk });
+    if (Array.isArray(res)) results.push(...res);
+  }
+  return results;
+}
+
+/**
  * Ermittelt die numerische Moodle-Kurs-ID aus einem Kurs-Objekt.
  * Priorität: 1) direkte numerische id (aus Power-Automate-Spalte), 2) URL-Parameter ?id=123
  */
@@ -163,18 +191,21 @@ export async function enrollInMoodle({
   const warnings = [];
   let usersCreated = 0;
 
-  // ── Schritt 1a: Bereits bestehende User suchen ────────────────────────────
+  // ── Schritt 1a: Bereits bestehende User suchen (in 200er-Chunks) ─────────
   report('Bestehende Accounts prüfen…', 10);
   try {
-    const existing = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', {
-      field: 'username',
-      values: generatedData.map(u => u.user),
-    });
-    console.log('[Moodle] core_user_get_users_by_field (Vorprüfung):', existing);
-    if (Array.isArray(existing)) {
-      existing.forEach(u => { userIdMap[u.username] = u.id; });
-      if (existing.length > 0) warnings.push(`${existing.length} User bereits vorhanden — werden wiederverwendet.`);
+    const usernames = generatedData.map(u => u.user);
+    const chunkSize = 200; // sicher unter PHP max_input_vars
+    const existing = [];
+    for (let i = 0; i < usernames.length; i += chunkSize) {
+      const chunk = usernames.slice(i, i + chunkSize);
+      try {
+        const res = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: chunk });
+        if (Array.isArray(res)) existing.push(...res);
+      } catch (e) { console.warn('[Moodle] Vorprüfung chunk fehlgeschlagen:', e.message); }
     }
+    existing.forEach(u => { userIdMap[u.username] = u.id; });
+    if (existing.length > 0) warnings.push(`${existing.length} User bereits vorhanden — werden wiederverwendet.`);
   } catch (e) {
     console.warn('[Moodle] Vorprüfung fehlgeschlagen:', e.message);
   }
@@ -183,38 +214,28 @@ export async function enrollInMoodle({
   const toCreate = usersPayload.filter(u => !userIdMap[u.username]);
   if (toCreate.length > 0) {
     report(`${toCreate.length} neue Accounts anlegen…`, 20);
-    try {
-      const created = await callMoodle(baseUrl, token, 'core_user_create_users', { users: toCreate });
-      console.log('[Moodle] core_user_create_users response:', created);
-      if (Array.isArray(created)) {
-        created.forEach(u => { userIdMap[u.username] = u.id; });
-        usersCreated = created.length;
-      }
-    } catch (err) {
-      console.error('[Moodle] Bulk-Erstellung fehlgeschlagen:', err.message);
-      warnings.push(`Bulk-Erstellung fehlgeschlagen (${err.message}). Versuche einzeln…`);
-      for (const user of toCreate) {
-        try {
-          const created = await callMoodle(baseUrl, token, 'core_user_create_users', { users: [user] });
-          console.log(`[Moodle] core_user_create_users (${user.username}):`, created);
-          if (Array.isArray(created) && created[0]) {
-            userIdMap[created[0].username] = created[0].id;
-            usersCreated++;
-          }
-        } catch (singleErr) {
-          // Erstellung fehlgeschlagen — User existiert möglicherweise bereits (z.B. wenn Schritt 1a
-          // fehlgeschlagen ist und die Vorprüfung den Account nicht gefunden hat).
-          // Nochmals per Lookup suchen, damit der Account trotzdem eingeschrieben werden kann.
+    const chunkSize = 50; // 50 User × ~5 Felder = 250 Parameter pro Request
+    for (let i = 0; i < toCreate.length; i += chunkSize) {
+      const chunk = toCreate.slice(i, i + chunkSize);
+      try {
+        const created = await callMoodle(baseUrl, token, 'core_user_create_users', { users: chunk });
+        if (Array.isArray(created)) {
+          created.forEach(u => { userIdMap[u.username] = u.id; });
+          usersCreated += created.length;
+        }
+      } catch (err) {
+        // Chunk fehlgeschlagen → jeden User einzeln versuchen
+        for (const user of chunk) {
           try {
-            const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: [user.username] });
-            if (Array.isArray(found) && found[0]) {
-              userIdMap[found[0].username] = found[0].id;
-            } else {
-              warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
-            }
-          } catch (lookupErr) {
-            console.error(`[Moodle] ${user.username}: weder anlegen noch finden:`, lookupErr.message);
-            warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
+            const created = await callMoodle(baseUrl, token, 'core_user_create_users', { users: [user] });
+            if (Array.isArray(created) && created[0]) { userIdMap[created[0].username] = created[0].id; usersCreated++; }
+          } catch {
+            // User existiert evtl. bereits — per Lookup nachholen
+            try {
+              const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: [user.username] });
+              if (Array.isArray(found) && found[0]) { userIdMap[found[0].username] = found[0].id; }
+              else warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
+            } catch { warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`); }
           }
         }
       }
@@ -338,33 +359,28 @@ export async function enrollInMoodle({
   });
 
   if (enrolments.length > 0) {
-    let failedEnrolments = [];
-    try {
-      await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments });
-    } catch (bulkErr) {
-      // Bulk fehlgeschlagen → jeden Eintrag einzeln versuchen, bis zu 3 Versuche
-      warnings.push(`Bulk-Einschreibung fehlgeschlagen (${bulkErr.message}) — versuche einzeln…`);
-      for (const enrolment of enrolments) {
-        let success = false;
-        for (let attempt = 1; attempt <= 3 && !success; attempt++) {
-          try {
-            await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: [enrolment] });
-            success = true;
-          } catch {
-            // nach 3 Fehlversuchen als gescheitert markieren
+    // 100 Einschreibungen × 5 Felder = 500 Parameter — sicher unter max_input_vars
+    const chunkSize = 100;
+    const failedEnrolments = [];
+    for (let i = 0; i < enrolments.length; i += chunkSize) {
+      const chunk = enrolments.slice(i, i + chunkSize);
+      try {
+        await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: chunk });
+      } catch (bulkErr) {
+        warnings.push(`Einschreibungs-Chunk fehlgeschlagen (${bulkErr.message}) — versuche einzeln…`);
+        for (const enrolment of chunk) {
+          let success = false;
+          for (let attempt = 1; attempt <= 3 && !success; attempt++) {
+            try { await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: [enrolment] }); success = true; } catch { /* retry */ }
           }
+          if (!success) failedEnrolments.push(enrolment);
         }
-        if (!success) failedEnrolments.push(enrolment);
       }
     }
     if (failedEnrolments.length > 0) {
       const failedUserIds = [...new Set(failedEnrolments.map(e => e.userid))];
-      // Username rückauflösen für lesbare Fehlermeldung
       const failedNames = failedUserIds.map(id => Object.keys(userIdMap).find(u => userIdMap[u] === id) ?? `ID ${id}`);
-      throw new Error(
-        `Einschreibung fehlgeschlagen für: ${failedNames.join(', ')}. ` +
-        `Bitte Moodle-Berechtigungen und Kurs-IDs prüfen.`
-      );
+      throw new Error(`Einschreibung fehlgeschlagen für: ${failedNames.join(', ')}. Bitte Moodle-Berechtigungen und Kurs-IDs prüfen.`);
     }
   }
 
@@ -396,16 +412,19 @@ export async function enrollInMoodle({
   });
 
   if (groupMembers.length > 0) {
-    try {
-      await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: groupMembers });
-    } catch (bulkErr) {
-      // Bulk fehlgeschlagen → einzeln versuchen
-      warnings.push(`Bulk-Gruppenzuweisung fehlgeschlagen (${bulkErr.message}). Versuche einzeln…`);
-      for (const member of groupMembers) {
-        try {
-          await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: [member] });
-        } catch (e) {
-          warnings.push(`Gruppenzuweisung für User-ID ${member.userid} in Gruppe ${member.groupid} fehlgeschlagen: ${e.message}`);
+    const chunkSize = 200; // 200 × 2 Felder = 400 Parameter
+    for (let i = 0; i < groupMembers.length; i += chunkSize) {
+      const chunk = groupMembers.slice(i, i + chunkSize);
+      try {
+        await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: chunk });
+      } catch (bulkErr) {
+        warnings.push(`Gruppen-Chunk fehlgeschlagen (${bulkErr.message}). Versuche einzeln…`);
+        for (const member of chunk) {
+          try {
+            await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: [member] });
+          } catch (e) {
+            warnings.push(`Gruppenzuweisung für User-ID ${member.userid} in Gruppe ${member.groupid} fehlgeschlagen: ${e.message}`);
+          }
         }
       }
     }
@@ -465,12 +484,14 @@ export async function enrollInMoodle({
       cohorttype: { type: 'id', value: String(cohortId) },
       usertype: { type: 'id', value: String(userid) },
     }));
-    try {
-      await callMoodle(baseUrl, token, 'core_cohort_add_cohort_members', {
-        members: cohortMembers,
-      });
-    } catch (e) {
-      warnings.push(`Kohorte-Zuweisung fehlgeschlagen: ${e.message}`);
+    const chunkSize = 100; // 100 × 4 Felder (nested) = sicher
+    for (let i = 0; i < cohortMembers.length; i += chunkSize) {
+      const chunk = cohortMembers.slice(i, i + chunkSize);
+      try {
+        await callMoodle(baseUrl, token, 'core_cohort_add_cohort_members', { members: chunk });
+      } catch (e) {
+        warnings.push(`Kohorte-Zuweisung fehlgeschlagen: ${e.message}`);
+      }
     }
   } else {
     warnings.push('Kohorte konnte nicht angelegt oder gefunden werden — Kohorte-Zuweisung übersprungen.');
