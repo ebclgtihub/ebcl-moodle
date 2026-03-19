@@ -612,20 +612,25 @@ export async function fetchInstituteGroups(baseUrl, token, institute, allCourseI
   const prefix = institute.trim() + '-';
   const groupsMap = new Map(); // name → {id, name, courseId, existingCourseIds: Set}
 
-  for (const courseId of allCourseIds) {
+  // Alle Kurse parallel abfragen statt sequenziell
+  const results = await Promise.all(allCourseIds.map(async courseId => {
     try {
       const groups = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid: courseId });
-      if (!Array.isArray(groups)) continue;
-      for (const g of groups) {
-        if (!g.name.startsWith(prefix)) continue;
-        if (!groupsMap.has(g.name)) {
-          groupsMap.set(g.name, { id: g.id, name: g.name, courseId, existingCourseIds: new Set([courseId]), memberCount: 0 });
-        } else {
-          groupsMap.get(g.name).existingCourseIds.add(courseId);
-        }
-      }
+      return { courseId, groups: Array.isArray(groups) ? groups : [] };
     } catch (e) {
       console.warn(`[Moodle] fetchInstituteGroups: Kurs ${courseId}:`, e.message);
+      return { courseId, groups: [] };
+    }
+  }));
+
+  for (const { courseId, groups } of results) {
+    for (const g of groups) {
+      if (!g.name.startsWith(prefix)) continue;
+      if (!groupsMap.has(g.name)) {
+        groupsMap.set(g.name, { id: g.id, name: g.name, courseId, existingCourseIds: new Set([courseId]), memberCount: 0 });
+      } else {
+        groupsMap.get(g.name).existingCourseIds.add(courseId);
+      }
     }
   }
 
