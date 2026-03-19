@@ -359,6 +359,10 @@ const App = () => {
         if (moodleUrl) setConfig(p => ({ ...p, moodleUrl }));
         const moodleToken = await store.get('moodleToken');
         if (moodleToken) setConfig(p => ({ ...p, moodleToken }));
+        const courseApiUrl = await store.get('courseApiUrl');
+        if (courseApiUrl) setConfig(p => ({ ...p, courseApiUrl }));
+        const sharepointUrl = await store.get('sharepointUrl');
+        if (sharepointUrl) setConfig(p => ({ ...p, sharepointUrl }));
         const zohoClientId = await store.get('zohoClientId');
         if (zohoClientId) setConfig(p => ({ ...p, zohoClientId }));
         const zohoClientSecret = await store.get('zohoClientSecret');
@@ -430,6 +434,8 @@ const App = () => {
         await store.set('showLeitfaden', config.showLeitfaden);
         await store.set('moodleUrl', config.moodleUrl);
         await store.set('moodleToken', config.moodleToken);
+        await store.set('courseApiUrl', config.courseApiUrl);
+        await store.set('sharepointUrl', config.sharepointUrl);
         await store.set('zohoClientId', config.zohoClientId);
         await store.set('zohoClientSecret', config.zohoClientSecret);
         await store.set('zohoRefreshToken', config.zohoRefreshToken);
@@ -449,7 +455,7 @@ const App = () => {
       }
     }, 600);
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, enrolMode, isStoreLoaded]); // eslint-disable-line
+  }, [exportHistory, darkMode, config.classSizes, config.classNames, config.studentPwd, config.trainerPwd, config.autoPassword, config.showLeitfaden, config.moodleUrl, config.moodleToken, config.courseApiUrl, config.sharepointUrl, config.zohoClientId, config.zohoClientSecret, config.zohoRefreshToken, config.moodleBetaEnabled, config.moodleBetaCourseIds, enrolMode, isStoreLoaded]); // eslint-disable-line
 
   // ─── Zoho: Alle Accounts laden (einmalig wenn aktiviert) ──────────────────
   const zohoEnabled = !!(config.zohoClientId && config.zohoClientSecret && config.zohoRefreshToken);
@@ -607,8 +613,20 @@ const App = () => {
   }, [config.classCounts, config.classSizes, config.trainerCount]);
 
   const classRows = useMemo(() => {
-    if (enrolMode === 'update' && moodleGroups.length > 0) {
-      return moodleGroups.map((g, i) => ({
+    const buildNewRows = (startId) => {
+      const rows = []; let id = startId;
+      [0, 1, 2, 3].forEach(idx => {
+        for (let i = 0; i < config.classCounts[idx]; i++) {
+          const defaultSize = config.classSizes[idx];
+          const customSize = config.classCustomSizes?.[id];
+          const size = customSize != null ? customSize : defaultSize;
+          rows.push({ id: id++, size, typeIdx: idx, defaultSize, isNew: true });
+        }
+      });
+      return rows;
+    };
+    if ((enrolMode === 'update' || enrolMode === 'both') && moodleGroups.length > 0) {
+      const existingRows = moodleGroups.map((g, i) => ({
         id: i + 1,
         size: g.memberCount,
         typeIdx: 0,
@@ -617,18 +635,14 @@ const App = () => {
         moodleGroupId: g.id,
         courseId: g.courseId,
         existingCourseIds: g.existingCourseIds || [],
+        isExisting: true,
       }));
-    }
-    const rows = []; let id = 1;
-    [0, 1, 2, 3].forEach(idx => {
-      for (let i = 0; i < config.classCounts[idx]; i++) {
-        const defaultSize = config.classSizes[idx];
-        const customSize = config.classCustomSizes?.[id];
-        const size = customSize != null ? customSize : defaultSize;
-        rows.push({ id: id++, size, typeIdx: idx, defaultSize });
+      if (enrolMode === 'both') {
+        return [...existingRows, ...buildNewRows(existingRows.length + 1)];
       }
-    });
-    return rows;
+      return existingRows;
+    }
+    return buildNewRows(1);
   }, [enrolMode, moodleGroups, config.classCounts, config.classSizes, config.classCustomSizes]);
 
   const rawEndDate = useMemo(() => {
@@ -649,7 +663,7 @@ const App = () => {
 
   // Wenn Modus wechselt oder Institut sich ändert, geladene Gruppen zurücksetzen
   useEffect(() => {
-    if (enrolMode !== 'update') { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); }
+    if (enrolMode !== 'update' && enrolMode !== 'both') { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); }
   }, [enrolMode]);
   useEffect(() => {
     setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({});
@@ -805,8 +819,8 @@ const App = () => {
     if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
     setShowGenerateConfirm(false);
     const activeIds = activeMatrixCourses.map(c => String(c.id));
-    const effectiveClassRows = enrolMode === 'update' && moodleGroups.length > 0
-      ? classRows.filter(r => r.moodleGroupId && selectedMoodleGroupIds.has(r.moodleGroupId))
+    const effectiveClassRows = (enrolMode === 'update' || enrolMode === 'both') && moodleGroups.length > 0
+      ? classRows.filter(r => r.isNew || (r.moodleGroupId && selectedMoodleGroupIds.has(r.moodleGroupId)))
       : enrolMode === 'update' && selectedUpdateClassIds.size < classRows.length
         ? classRows.filter(r => selectedUpdateClassIds.has(r.id))
         : classRows;
@@ -819,16 +833,17 @@ const App = () => {
     if (badIds.size) { setInvalidClassIds(badIds); return addToast(`${badIds.size} Klasse(n) ohne Kurszuweisung — rot markiert.`, 'error'); }
     setInvalidClassIds(new Set());
 
-    // ── Aktualisieren-Modus mit geladenen Moodle-Gruppen ─────────────────────
-    if (enrolMode === 'update' && moodleGroups.length > 0) {
+    // ── Aktualisieren / Kombiniert-Modus mit geladenen Moodle-Gruppen ─────────
+    if ((enrolMode === 'update' || enrolMode === 'both') && moodleGroups.length > 0) {
       const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
       const usernameSet = new Set();
       const data = [];
-      // Alle bekannten Kurse (Pool + allMoodleCourses) für ID-Lookup
       const allKnownCourseMap = new Map([...courseDictionary, ...(allMoodleCourses.length > 0 ? allMoodleCourses : [])].map(c => [String(c.id), c]));
-      for (const r of effectiveClassRows) {
+
+      // --- Bestehende Klassen (aus Moodle-Gruppen) ---
+      const existingRows = effectiveClassRows.filter(r => r.isExisting);
+      for (const r of existingRows) {
         const matrixIds = new Set((classMatrix[r.id] || []).map(String));
-        // Bestehende Kurse (aus Moodle) + manuell neu zugewiesene kombinieren
         const allCourseIds = new Set([...(r.existingCourseIds || []).map(String), ...matrixIds]);
         const selCourses = [...allCourseIds].map(id => allKnownCourseMap.get(id)).filter(Boolean);
         const classLabel = r.groupName;
@@ -854,8 +869,50 @@ const App = () => {
           addToast(`Fehler beim Laden von ${r.groupName}: ${e.message}`, 'error');
         }
       }
+
+      // --- Neue Klassen (nur im 'both'-Modus) ---
+      const newRows = enrolMode === 'both' ? effectiveClassRows.filter(r => r.isNew) : [];
+      if (newRows.length > 0 || (enrolMode === 'both' && config.trainerCount > 0)) {
+        let studentOffset = 0, trainerOffset = 0;
+        classGroupOffsetRef.current = moodleGroups.length;
+        if (config.moodleUrl?.trim() && config.moodleToken?.trim()) {
+          setIsFindingMaxNumbers(true);
+          try {
+            const activeCourseIds = activeMatrixCourses.map(c => {
+              const numId = parseInt(String(c?.id ?? ''), 10);
+              return (!isNaN(numId) && numId > 0) ? numId : null;
+            }).filter(Boolean);
+            const { maxStudent, maxTrainer } = await findMaxNumbers(config.moodleUrl, config.moodleToken, instClean, activeCourseIds);
+            studentOffset = maxStudent;
+            trainerOffset = maxTrainer;
+          } catch (e) {
+            addToast(`Moodle-Abfrage für Offset fehlgeschlagen: ${e.message} — starte bei 1.`, 'error');
+          } finally {
+            setIsFindingMaxNumbers(false);
+          }
+        }
+        for (let t = 1; t <= config.trainerCount; t++) {
+          const tNum = trainerOffset + t;
+          const uname = `${instClean}-trainer-${tNum}`;
+          if (!usernameSet.has(uname)) {
+            usernameSet.add(uname);
+            data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: uname, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+          }
+        }
+        let sIdx = studentOffset + 1;
+        for (const r of newRows) {
+          const selIds = (classMatrix[r.id] || []).map(String);
+          const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
+          const classLabel = `${config.institute}-${getClassLabel(r)}`;
+          for (let i = 0; i < r.size; i++) {
+            const id = String(sIdx++).padStart(3, '0');
+            data.push({ cNum: String(r.id + classGroupOffsetRef.current).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
+          }
+        }
+      }
+
       setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
-      addToast(`${data.length} Accounts aus Moodle geladen.`, 'success');
+      addToast(`${data.length} Accounts verarbeitet.`, 'success');
       return;
     }
 
@@ -1344,12 +1401,22 @@ const App = () => {
       }
 
       // Matrix mit bestehenden Pool-Kursen vorfüllen + Locked-Map aufbauen
-      const poolIdSet = new Set(courseDictionary.map(c => String(c.id)));
+      // courseDictionary.id ist die externe API-ID; Moodle-ID steckt in .url (?id=123) oder ist numerisch
+      const getMoodleId = c => {
+        const numId = parseInt(String(c?.id ?? ''), 10);
+        if (!isNaN(numId) && numId > 0) return numId;
+        if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) return parseInt(m[1], 10); }
+        return null;
+      };
       const newMatrix = {};
       const newLocked = {};
       groups.forEach((g, i) => {
         const rowId = i + 1;
-        const existingPoolIds = (g.existingCourseIds || []).map(String).filter(id => poolIdSet.has(id));
+        const existingMoodleIds = new Set((g.existingCourseIds || []).map(Number));
+        // Finde Pool-Kurse deren Moodle-ID in den existierenden Kurs-IDs liegt
+        const existingPoolIds = courseDictionary
+          .filter(c => existingMoodleIds.has(getMoodleId(c)))
+          .map(c => String(c.id)); // externe API-ID, passend zu selectedPoolCourseIds
         newMatrix[rowId] = existingPoolIds;
         newLocked[rowId] = new Set(existingPoolIds);
       });
@@ -1634,16 +1701,15 @@ const App = () => {
           {helpTab === 'workflow' && (
             <div>
               <HSection icon={<Zap size={14} />} title="Was macht dieses Programm?">
-                <Info>EBCL-Moodle erstellt automatisch Moodle-Zugangsdaten für Partnerinstitute. Du konfigurierst einmal die Klassen- und Kursstruktur, generierst die Zugänge und exportierst oder schreibst direkt ein — fertig.</Info>
-                <Info>Die Kursliste wird automatisch vom EBCL-Server geladen und lokal gecacht, sodass die App auch offline funktioniert.</Info>
+                <Info>EBCL-Moodle verwaltet Moodle-Zugangsdaten für Partnerinstitute — in drei Modi: neue Accounts anlegen, bestehende Klassen aktualisieren oder beides in einem Durchlauf.</Info>
+                <Info>Die Kursliste wird vom EBCL-Server geladen und lokal gecacht, sodass Generieren und Exportieren auch offline funktioniert.</Info>
               </HSection>
-              <HSection icon={<Users size={14} />} title="Schritt-für-Schritt Workflow">
+              <HSection icon={<RefreshCw size={14} />} title="Modus: Aktualisieren">
                 {[
-                  ['01', C.accent1,  'Institutsname eingeben',     'Den Namen des Partnerinstituts eingeben (Leerzeichen werden automatisch zu Bindestrichen). Pflichtfeld.'],
-                  ['02', C.accent2,  'Klassen & Trainer definieren','Anzahl der Klassen pro Typ und Traineranzahl festlegen. Klassengrößen sind in den Einstellungen anpassbar.'],
-                  ['03', C.main,     'Kurse zuweisen',              'In der Kurs-Matrix Kurse pro Spalte wählen und jeder Klasse zuweisen. "Alle zuweisen" (⌘⇧A) belegt alle auf einmal.'],
-                  ['04', '#7C3AED',  'Liste generieren',            '⌘G — App prüft Vollständigkeit und markiert fehlende Zuweisungen rot.'],
-                  ['05', '#0078d4',  'Exportieren oder Einschreiben','CSV/PDF/Excel lokal speichern, direkt zu SharePoint hochladen oder via Moodle REST API direkt einschreiben.'],
+                  ['01', C.accent1, 'Institut wählen & Klassen laden',  'Institutsname eingeben, dann "Klassen laden" — die App fragt Moodle ab und listet alle vorhandenen Klassen des Instituts mit Mitgliederzahl.'],
+                  ['02', C.accent1, 'Klassen auswählen',                'Checkboxen aktivieren welche Klassen aktualisiert werden sollen. Abgewählte Klassen erscheinen nicht in der Matrix.'],
+                  ['03', C.accent1, 'Matrix prüfen',                    'Bereits eingeschriebene Kurse sind blau mit RefreshCw-Symbol vorbelegt und können nicht abgewählt werden. Weitere Kurse können ergänzt werden.'],
+                  ['04', C.accent1, 'Generieren & Einschreiben',        '⌘G — lädt die echten Moodle-Mitglieder und schreibt sie erneut ein (Zeitraum & Passwort werden aktualisiert).'],
                 ].map(([n, col, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
@@ -1651,9 +1717,26 @@ const App = () => {
                   </div>
                 ))}
               </HSection>
+              <HSection icon={<Plus size={14} />} title="Modus: Neu anlegen">
+                {[
+                  ['01', C.accent2, 'Institut & Klassenstruktur',       'Institutsname eingeben, Anzahl der Klassen pro Typ und Traineranzahl festlegen.'],
+                  ['02', C.accent2, 'Kurse zuweisen',                   'In der Matrix jeder Klasse die gewünschten Kurse zuweisen. Alle auf einmal mit ⌘⇧A.'],
+                  ['03', C.accent2, 'Generieren',                       '⌘G — App fragt Moodle ab um den höchsten bestehenden Account zu finden und nummeriert neue Accounts fortlaufend dahinter (keine Lücken, keine Duplikate).'],
+                  ['04', C.accent2, 'Exportieren oder Einschreiben',    'CSV/PDF/Excel speichern, zu SharePoint hochladen oder direkt per REST API in Moodle einschreiben.'],
+                ].map(([n, col, title, desc]) => (
+                  <div key={n} className="flex gap-3 items-start">
+                    <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
+                    <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
+                  </div>
+                ))}
+              </HSection>
+              <HSection icon={<Zap size={14} />} title="Modus: Aktualisieren & Neu anlegen">
+                <Info>Kombinierter Modus: bestehende Klassen aus Moodle laden und auswählen (werden aktualisiert) und gleichzeitig neue Klassen konfigurieren — alles in einem einzigen Einschreibelauf.</Info>
+                <Info>Die Matrix zeigt zuerst die bestehenden Klassen (mit gesperrten Kursen), dann nach einem Trenner die neuen Klassen. Neue Accounts werden automatisch hinter den bestehenden nummeriert.</Info>
+              </HSection>
               <HSection icon={<RefreshCw size={14} />} title="Was wird beim Neustart zurückgesetzt?">
-                <Info>Bei jedem App-Start wird zurückgesetzt: Institutsname, Datum, Kursauswahl und Klassenzuweisungen.</Info>
-                <Info><strong style={{ color: C.text }}>Erhalten bleiben:</strong> Export-History, Klassengrößen, Klassen-Namen, Passwörter, Backend-URLs, Moodle-Token und Dark Mode.</Info>
+                <Info>Bei jedem App-Start zurückgesetzt: Institutsname, Datum, Kursauswahl, Klassenzuweisungen und geladene Moodle-Gruppen.</Info>
+                <Info><strong style={{ color: C.text }}>Erhalten bleiben:</strong> Export-History, Klassengrößen, Klassen-Namen, Passwörter, Backend-URLs, Moodle-Token, Modus und Dark Mode.</Info>
               </HSection>
             </div>
           )}
@@ -1662,14 +1745,20 @@ const App = () => {
           {helpTab === 'config' && (
             <div className="space-y-1">
               <HSection icon={<Building2 size={14} />} title="Organisation">
-                <Row label="Institutsname" desc="Pflichtfeld. Leerzeichen werden automatisch zu Bindestrichen. Wird als Präfix für alle Usernamen, im Dateinamen und im PDF verwendet." />
-                <Row label="Trainer" desc="Anzahl der Trainer-Accounts. Trainer werden in ALLE aktiven Kurse eingeschrieben (Rolle: Lehrbeauftragter) und zu allen Klassen-Gruppen hinzugefügt." />
+                <Row label="Institutsname" desc="Pflichtfeld. Leerzeichen bleiben erhalten und werden nur intern für Usernamen entfernt (z.B. 'Test Institut' → Username-Prefix 'testinstitut'). Im Zoho-Dropdown werden passende CRM-Accounts vorgeschlagen." />
+                <Row label="Trainer" desc="Anzahl der Trainer-Accounts. Im Neu-anlegen-Modus werden neue Trainer generiert. Im Aktualisieren-Modus werden bestehende Trainer aus der Gruppe geladen." />
                 <Row label="Kurs Anzahl" desc="Anzahl der Kursspalten in der Matrix (max. 8). Entspricht der Anzahl der Moodle-Kurse pro Institut." />
               </HSection>
-              <HSection icon={<GraduationCap size={14} />} title="Klassen Struktur">
-                <Row label="Typen (Größen)" desc="Jeder Typ definiert eine Klassengröße (Standard: 15/20/30/40 Plätze). Über 'Anzahl' rechts bestimmst du wie viele Klassen dieses Typs erstellt werden." />
-                <Row label="Klassengrößen" desc="In den Einstellungen → Allgemein anpassbar. Werden gespeichert und bleiben beim Neustart erhalten." />
-                <Row label="Klassen-Namen" desc="Optional in den Einstellungen anpassbar (z.B. 'IT-Klasse A'). Standard: K-01, K-02, … Werden ebenfalls gespeichert." />
+              <HSection icon={<GraduationCap size={14} />} title="Modus">
+                <Row label="Aktualisieren" desc="Klassen werden aus Moodle geladen. Bestehende Einschreibungen werden erkannt (RefreshCw) und beim Einschreiben aktualisiert (Zeitraum, Passwort)." />
+                <Row label="Neu anlegen" desc="Neue Accounts werden generiert, fortlaufend nach den höchsten bestehenden Nummern in Moodle. Klassen, Schüler und Trainer werden automatisch weiternummeriert." />
+                <Row label="Aktualisieren & Neu anlegen" desc="Kombinierter Modus: bestehende Klassen auswählen (werden aktualisiert) und zusätzlich neue Klassen konfigurieren — in einem Durchlauf." />
+              </HSection>
+              <HSection icon={<GraduationCap size={14} />} title="Klassen (je nach Modus)">
+                <Row label="Klassen aus Moodle" desc="Im Aktualisieren- und Kombiniert-Modus: lädt alle Gruppen des Instituts aus Moodle (kursübergreifend). Mitgliederzahl wird angezeigt (ohne Trainer). Per Checkbox auswählen welche Klassen bearbeitet werden." />
+                <Row label="Klassen Struktur" desc="Im Neu-anlegen-Modus und im Kombiniert-Modus (unterer Teil): Typen mit Klassengrößen und Anzahl definieren. Größen in den Einstellungen → Allgemein anpassbar." />
+                <Row label="Klassengrößen editieren" desc="Bleistift-Icon neben der Schülerzahl zum einmaligen Anpassen. X-Button setzt auf Standardgröße zurück. Im Aktualisieren-Modus nicht verfügbar (echte Mitgliederzahl)." />
+                <Row label="Klassen-Namen" desc="Optional in den Einstellungen anpassbar. Werden gespeichert und bleiben beim Neustart erhalten." />
               </HSection>
               <HSection icon={<ShieldCheck size={14} />} title="Zeit & Passwörter">
                 <Row label="Einschreibedatum" desc="Ab wann die Accounts in Moodle aktiv sind. Wird beim App-Start auf heute gesetzt." />
@@ -1697,9 +1786,15 @@ const App = () => {
               </HSection>
               <HSection icon={<TableIcon size={14} />} title="Matrix-Bedienung">
                 <Row label="Kurs auswählen" desc="Im Dropdown oben in jeder Spalte einen Kurs aus dem Pool wählen. Mit Suche und Tag-Filterung. Bis zu 8 Kursspalten gleichzeitig möglich." />
-                <Row label="Zuweisung" desc="Per Checkbox bestimmen, welche Klassen welche Kurse erhalten. Eine Klasse kann mehrere Kurse haben." />
-                <Row label="Spalten-Alle-Button" desc="Der blaue 'Alle'-Button im Spaltenkopf weist alle Klassen diesem Kurs zu oder entfernt alle (Toggle)." />
+                <Row label="Zuweisung" desc="Per Klick bestimmen welche Klassen welche Kurse erhalten. Eine Klasse kann mehrere Kurse haben." />
+                <Row label="Spalten-Alle-Button" desc="Der blaue 'Alle'-Button im Spaltenkopf weist alle (sichtbaren) Klassen diesem Kurs zu oder entfernt sie (Toggle)." />
                 <Row label="Alle zuweisen (⌘⇧A)" desc="Weist alle Klassen allen aktiven Kursen zu — schnellster Weg wenn alle Klassen dieselben Kurse bekommen." />
+              </HSection>
+              <HSection icon={<RefreshCw size={14} />} title="Gesperrte Kurse (Aktualisieren-Modus)">
+                <Info>Wenn Klassen aus Moodle geladen werden, erkennt die App automatisch in welchen Pool-Kursen die Klasse bereits eingeschrieben ist.</Info>
+                <Row label="RefreshCw-Symbol (blau)" desc="Kurs ist bereits eingeschrieben — wird beim nächsten Einschreiben aktualisiert (Zeitraum, Passwort). Kann nicht abgewählt werden." />
+                <Row label="Grünes Häkchen" desc="Kurs wurde manuell zusätzlich zugewiesen — wird neu eingeschrieben." />
+                <Row label="Trennlinie 'Neue Klassen'" desc="Im 'Aktualisieren & Neu anlegen'-Modus trennt eine Linie bestehende (oben) von neuen Klassen (unten) in der Matrix." />
               </HSection>
               <HSection icon={<AlertTriangle size={14} />} title="Validierung">
                 <Info>Beim Generieren prüft die App ob jede Klasse mindestens einem Kurs zugewiesen ist. Klassen ohne Zuweisung werden <span style={{ color: '#e11d48' }}>rot markiert</span>. Die Markierung verschwindet sobald eine Zuweisung gesetzt wird.</Info>
@@ -1743,7 +1838,10 @@ const App = () => {
           {helpTab === 'moodle' && (
             <div>
               <HSection icon={<GraduationCap size={14} />} title="Direkte Moodle-Einschreibung">
-                <Info>Statt den CSV-Umweg zu nehmen können Accounts direkt über die Moodle REST API angelegt und eingeschrieben werden. Das gesamte Einschreibe-Ergebnis wird danach automatisch zu SharePoint hochgeladen.</Info>
+                <Info>Accounts werden direkt über die Moodle REST API angelegt und eingeschrieben — kein CSV-Umweg nötig. Funktioniert in allen drei Modi (Neu anlegen, Aktualisieren, Beides). Das Ergebnis wird danach automatisch zu SharePoint hochgeladen.</Info>
+                <Row label="Neu anlegen" desc="Erstellt neue Accounts fortlaufend nach den höchsten bestehenden Nummern. Schüler, Trainer und Klassen werden automatisch weiternummeriert." />
+                <Row label="Aktualisieren" desc="Lädt echte Moodle-Mitglieder der ausgewählten Gruppen und schreibt sie neu ein — Zeitraum und Passwort werden aktualisiert. Neue Accounts werden dabei nicht erstellt." />
+                <Row label="Aktualisieren & Neu anlegen" desc="Kombinierter Durchlauf: bestehende Gruppen werden aktualisiert, neue Accounts für neue Klassen werden erstellt und eingeschrieben." />
               </HSection>
               <HSection icon={<Settings size={14} />} title="Einrichtung">
                 <Row label="Moodle URL" desc="Die Basis-URL deiner Moodle-Instanz, z.B. https://moodle.ebcl.at. Einstellungen → Backend." />
@@ -1759,12 +1857,14 @@ const App = () => {
                     'enrol_manual_enrol_users',
                     'core_group_create_groups',
                     'core_group_get_course_groups',
+                    'core_group_get_group_members',
                     'core_group_add_group_members',
                     'core_cohort_create_cohorts',
                     'core_cohort_search_cohorts',
                     'core_cohort_add_cohort_members',
                     'core_enrol_get_enrolled_users',
                     'core_enrol_get_users_courses',
+                    'core_course_get_courses',
                   ].map(fn => (
                     <div key={fn} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-3 py-1.5 rounded-lg border font-mono text-[10px]" >
                       <span style={{ color: C.accent1 }}>{fn}</span>
@@ -1772,16 +1872,30 @@ const App = () => {
                   ))}
                 </div>
               </HSection>
-              <HSection icon={<Zap size={14} />} title="Was passiert beim Einschreiben?">
+              <HSection icon={<Zap size={14} />} title="Was passiert beim Einschreiben? (Neu anlegen)">
                 {[
-                  ['1', 'Nutzer prüfen',    'Bestehende Accounts werden per Username gesucht und wiederverwendet — keine Duplikate.'],
-                  ['2', 'Nutzer anlegen',   'Nur neue Accounts werden erstellt. Bei Fehler wird auf Einzel-Anlage zurückgefallen.'],
-                  ['3', 'Gruppen',          'Pro Kurs und Klasse wird eine Gruppe angelegt (falls nicht vorhanden). Trainer werden zu allen Gruppen hinzugefügt.'],
-                  ['4', 'Einschreiben',     'Schüler → zugewiesene Kurse (Rolle: Student). Trainer → alle Kurse (Rolle: Lehrbeauftragter). Mit Zeitraum.'],
-                  ['5', 'Kohorte',          'Eine System-Kohorte mit dem Institutsnamen wird angelegt oder gefunden. Alle Accounts werden zugeordnet.'],
+                  ['1', 'Offset ermitteln', 'Die App sucht die höchsten bestehenden Account-Nummern in Moodle und nummeriert neue Accounts lückenlos dahinter.'],
+                  ['2', 'Nutzer prüfen',    'Bestehende Accounts werden per Username gesucht und wiederverwendet — keine Duplikate.'],
+                  ['3', 'Nutzer anlegen',   'Nur wirklich neue Accounts werden erstellt. Bei Fehler wird auf Einzel-Anlage zurückgefallen.'],
+                  ['4', 'Gruppen',          'Pro Kurs und Klasse wird eine Gruppe angelegt (falls nicht vorhanden). Trainer werden zu allen Gruppen hinzugefügt.'],
+                  ['5', 'Einschreiben',     'Schüler → zugewiesene Kurse (Rolle: Student). Trainer → alle Kurse (Rolle: Lehrbeauftragter). Mit Einschreibezeitraum.'],
+                  ['6', 'Kohorte',          'Eine System-Kohorte mit dem Institutsnamen wird angelegt oder gefunden. Alle Accounts werden zugeordnet.'],
                 ].map(([n, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: '#7C3AED', backgroundColor: '#7C3AED18', borderColor: '#7C3AED30' }} className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
+                    <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
+                  </div>
+                ))}
+              </HSection>
+              <HSection icon={<RefreshCw size={14} />} title="Was passiert beim Einschreiben? (Aktualisieren)">
+                {[
+                  ['1', 'Klassen laden',    'Die App lädt alle Gruppen des Instituts kursübergreifend aus Moodle (core_group_get_course_groups).'],
+                  ['2', 'Mitglieder laden', 'Für jede ausgewählte Gruppe werden die echten Moodle-Mitglieder geladen (core_enrol_get_enrolled_users). Trainer werden automatisch erkannt.'],
+                  ['3', 'Kurse kombinieren','Bereits eingeschriebene Kurse (gesperrt) und manuell ergänzte Kurse werden zusammengeführt.'],
+                  ['4', 'Einschreiben',     'Alle Mitglieder werden erneut in alle ihre Kurse eingeschrieben — Zeitraum und Passwort werden dabei aktualisiert.'],
+                ].map(([n, title, desc]) => (
+                  <div key={n} className="flex gap-3 items-start">
+                    <span style={{ color: C.accent1, backgroundColor: C.accent1 + '18', borderColor: C.accent1 + '30' }} className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
                     <div><p style={{ color: C.text }} className="text-[11px] font-semibold mb-0.5">{title}</p><p style={{ color: C.muted }} className="text-[11px] leading-relaxed">{desc}</p></div>
                   </div>
                 ))}
@@ -1859,12 +1973,14 @@ const App = () => {
                 </div>
               </HSection>
               <HSection icon={<Zap size={14} />} title="Tipps & Tricks">
-                <Row label="Offline arbeiten" desc="Der Kurs-Pool wird gecacht. Generieren und Exportieren funktioniert ohne Internet — solange der Cache vorhanden ist." />
-                <Row label="Favoriten" desc="Häufig verwendete Institute als Favorit speichern. Das Datum wird beim Laden automatisch auf heute gesetzt." />
+                <Row label="Modus wählen" desc="'Aktualisieren' für Folgesessions mit bestehenden Klassen. 'Neu anlegen' für erste Einschreibung. 'Beides' wenn neue Klassen zu einem Institut dazukommen." />
+                <Row label="Klassen schnell laden" desc="Im Aktualisieren-Modus erst Institut eingeben, dann 'Klassen laden' — die App findet automatisch alle Gruppen in allen Kursen." />
+                <Row label="Gesperrte Kurse" desc="RefreshCw (blau) = bereits eingeschrieben, wird aktualisiert. Grünes Häkchen = manuell ergänzt, wird neu eingeschrieben." />
+                <Row label="Offset-Erkennung" desc="Im Neu-anlegen-Modus wird Moodle abgefragt um die höchsten bestehenden Nummern zu finden — neue Accounts starten automatisch dahinter." />
                 <Row label="Alle zuweisen" desc="Bei gleicher Kursstruktur für alle Klassen: ⌘⇧A spart alle Einzelklicks in der Matrix." />
-                <Row label="Daten-Vorschau" desc="Vor dem Export alle Accounts nochmal prüfen — Fehler früh erkennen." />
-                <Row label="Dark Mode" desc="Toggle über den Mond/Sonne-Button in der Sidebar oder in den Einstellungen. Wird dauerhaft gespeichert." />
-                <Row label="Fenstergröße" desc="Das Fenster ist skalierbar. Letzte Größe und Position werden beim nächsten Start wiederhergestellt." />
+                <Row label="Favoriten" desc="Häufig verwendete Institute als Favorit speichern. Das Datum wird beim Laden automatisch auf heute gesetzt." />
+                <Row label="Offline arbeiten" desc="Der Kurs-Pool wird gecacht. Generieren und Exportieren funktioniert ohne Internet — solange der Cache vorhanden ist." />
+                <Row label="Daten-Vorschau" desc="Vor dem Export alle Accounts nochmal prüfen — insbesondere im Aktualisieren-Modus die korrekten Moodle-Mitglieder verifizieren." />
               </HSection>
               <HSection icon={<RefreshCw size={14} />} title="Updates">
                 <Info>Die App prüft beim Start automatisch auf neue Versionen. Bei einem verfügbaren Update erscheint ein Popup in der Bildschirmmitte. Nach dem Download startet die App automatisch neu.</Info>
@@ -2888,7 +3004,7 @@ const App = () => {
 
           {/* Konfiguration */}
           <section style={{ backgroundColor: C.card, borderColor: C.border }} className="p-2 rounded-3xl shadow-sm border shrink-0">
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 md:items-start">
 
               {/* Org */}
               <div style={{ backgroundColor: C.subtle }} className="md:col-span-4 p-4 lg:p-5 rounded-2xl">
@@ -2952,31 +3068,51 @@ const App = () => {
                   {/* Aktualisieren / Neu anlegen */}
                   <div>
                     <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-1.5 ml-1">Modus</label>
-                    <div style={{ borderColor: C.border }} className="flex rounded-xl overflow-hidden border">
-                      {[{ id: 'update', label: 'Aktualisieren' }, { id: 'new', label: 'Neu anlegen' }].map(m => (
-                        <button
-                          key={m.id}
-                          onClick={() => setEnrolMode(m.id)}
-                          style={{
-                            backgroundColor: enrolMode === m.id ? (m.id === 'new' ? C.accent2 : C.accent1) : 'transparent',
-                            color: enrolMode === m.id ? '#fff' : C.muted,
-                          }}
-                          className="flex-1 py-1.5 text-[9px] font-bold uppercase tracking-wide transition-all"
-                        >
-                          {m.label}
-                        </button>
-                      ))}
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        onClick={() => setEnrolMode('both')}
+                        style={{
+                          backgroundColor: enrolMode === 'both' ? C.main : 'transparent',
+                          borderColor: enrolMode === 'both' ? C.main : C.border,
+                          color: enrolMode === 'both' ? '#fff' : C.muted,
+                        }}
+                        className="w-full py-2 text-[10px] font-bold uppercase tracking-wide border rounded-xl transition-all"
+                      >
+                        Aktualisieren &amp; Neu anlegen
+                      </button>
+                      <div className="flex gap-1.5">
+                        {[{ id: 'update', label: 'Aktualisieren', color: C.accent1 }, { id: 'new', label: 'Neu anlegen', color: C.accent2 }].map(m => (
+                          <button
+                            key={m.id}
+                            onClick={() => setEnrolMode(m.id)}
+                            style={{
+                              backgroundColor: enrolMode === m.id ? m.color : 'transparent',
+                              borderColor: enrolMode === m.id ? m.color : C.border,
+                              color: enrolMode === m.id ? '#fff' : C.muted,
+                            }}
+                            className="flex-1 py-1.5 text-[9px] font-bold uppercase tracking-wide border rounded-xl transition-all"
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
+                    {enrolMode === 'update' && (
+                      <p style={{ color: C.accent1 }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aus Moodle laden, auswählen und Zeitraum & Passwort aktualisieren.</p>
+                    )}
                     {enrolMode === 'new' && (
                       <p style={{ color: C.accent2 }} className="text-[8px] mt-1 ml-1 leading-snug">Schüler/Trainer/Klassen werden fortlaufend nach bestehenden Einträgen nummeriert.</p>
+                    )}
+                    {enrolMode === 'both' && (
+                      <p style={{ color: C.main }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aktualisieren + neue Klassen hinzufügen — in einem Durchlauf.</p>
                     )}
                   </div>
                 </div>
               </div>
 
               {/* Klassen */}
-              <div style={{ backgroundColor: C.card, borderColor: C.border }} className="md:col-span-3 p-4 lg:p-5 rounded-2xl border shadow-sm">
-                {enrolMode === 'update' ? (
+              <div style={{ backgroundColor: C.card, borderColor: C.border }} className="md:col-span-3 p-4 lg:p-5 rounded-2xl border shadow-sm overflow-y-auto max-h-72 custom-scrollbar">
+                {enrolMode === 'update' || enrolMode === 'both' ? (
                   <>
                     <h3 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-3"><GraduationCap size={12} /> Klassen aus Moodle</h3>
                     {moodleGroups.length === 0 ? (
@@ -3027,6 +3163,23 @@ const App = () => {
                         >
                           <RefreshCw size={10} /> Neu laden
                         </button>
+                      </>
+                    )}
+                    {enrolMode === 'both' && (
+                      <>
+                        <div style={{ borderColor: C.border }} className="my-3 border-t" />
+                        <h3 style={{ color: C.main }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-2"><Plus size={12} /> Neue Klassen</h3>
+                        <div className="space-y-2">
+                          {config.classSizes.map((size, idx) => (
+                            <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex justify-between items-center px-3 py-1.5 rounded-lg border focus-within:border-blue-300 transition-colors">
+                              <span style={{ color: C.muted }} className="text-[11px] font-medium">{size} Plätze</span>
+                              <div className="flex items-center gap-1.5">
+                                <span style={{ color: C.muted }} className="text-[9px]">Anz:</span>
+                                <input type="number" min="0" value={config.classCounts[idx]} onChange={e => updateClassCount(idx, e.target.value)} style={{ color: C.main }} className="w-8 bg-transparent text-right text-sm font-semibold outline-none" />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </>
                     )}
                   </>
@@ -3117,7 +3270,10 @@ const App = () => {
                 )}
               </div>
               <div style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="text-[9px] font-medium px-2.5 py-1 rounded-full border">
-                {classRows.length} Klassen · {config.courseSlotCount} Kurse
+                {classRows.filter(c => {
+                  if (enrolMode === 'update' && c.isNew) return false;
+                  return !c.isExisting || selectedMoodleGroupIds.has(c.moodleGroupId);
+                }).length} Klassen · {activeMatrixCourses.length} Kurse
               </div>
             </div>
 
@@ -3233,12 +3389,20 @@ const App = () => {
                 <tbody style={{ borderColor: C.border }} className="divide-y text-[11px]">
                   {classRows.length === 0 ? (
                     <tr><td colSpan={config.courseSlotCount + 1} style={{ color: C.muted }} className="py-10 text-center italic font-medium">Bitte oben Klassen definieren.</td></tr>
-                  ) : classRows.map(c => {
+                  ) : classRows.filter(c => {
+                    if (enrolMode === 'update' && c.isNew) return false;
+                    return !c.isExisting || selectedMoodleGroupIds.has(c.moodleGroupId);
+                  }).map((c, rowIdx, visibleRows) => {
                     const isInvalid = invalidClassIds.has(c.id);
-                    const isDeselected = enrolMode === 'update' && !selectedUpdateClassIds.has(c.id);
+                    const isDeselected = !c.isExisting && enrolMode === 'update' && !selectedUpdateClassIds.has(c.id);
                     const customName = config.classNames?.[c.id - 1]?.trim();
+                    const isFirstNewRow = enrolMode === 'both' && c.isNew && (rowIdx === 0 || !visibleRows[rowIdx - 1].isNew);
                     return (
-                      <tr key={c.id} style={{ backgroundColor: isInvalid ? '#FFF1F2' : undefined, opacity: isDeselected ? 0.4 : 1 }} className={`transition-all group ${!isInvalid ? 'hover:bg-blue-50/10' : ''}`}>
+                      <React.Fragment key={c.id}>
+                      {isFirstNewRow && (
+                        <tr><td colSpan={config.courseSlotCount + 1} style={{ backgroundColor: C.main + '12', borderColor: C.main + '30', color: C.main }} className="px-3 py-1 text-[9px] font-bold uppercase tracking-widest border-y"><Plus size={9} className="inline mr-1" />Neue Klassen</td></tr>
+                      )}
+                      <tr style={{ backgroundColor: isInvalid ? '#FFF1F2' : undefined, opacity: isDeselected ? 0.4 : 1 }} className={`transition-all group ${!isInvalid ? 'hover:bg-blue-50/10' : ''}`}>
                         <td style={{ borderColor: isInvalid ? '#FECDD3' : C.border, backgroundColor: isInvalid ? '#FFE4E6' : C.subtle }} className="px-3 py-3 text-center border-r">
                           <div className="flex flex-col gap-0.5 items-center">
                             {isInvalid && <AlertTriangle size={11} className="text-rose-500 mb-0.5" />}
@@ -3259,7 +3423,7 @@ const App = () => {
                             ) : (
                               <div className="flex items-center gap-0.5">
                                 <span style={{ color: isInvalid ? '#BE123C' : C.muted, backgroundColor: isInvalid ? '#FEE2E2' : C.card, borderColor: isInvalid ? '#FECDD3' : C.border }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.size} Pl.</span>
-                                {!(enrolMode === 'update' && moodleGroups.length > 0) && <button
+                                {!c.isExisting && <button
                                   onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.size)); }}
                                   title="Schülerzahl bearbeiten"
                                   style={{ color: config.classCustomSizes?.[c.id] != null ? '#3b82f6' : C.muted }}
@@ -3267,7 +3431,7 @@ const App = () => {
                                 >
                                   <Edit3 size={9} />
                                 </button>}
-                                {!(enrolMode === 'update' && moodleGroups.length > 0) && config.classCustomSizes?.[c.id] != null && (
+                                {!c.isExisting && config.classCustomSizes?.[c.id] != null && (
                                   <button
                                     onClick={() => setConfig(p => { const s = { ...p.classCustomSizes }; delete s[c.id]; return { ...p, classCustomSizes: s }; })}
                                     title="Custom-Größe zurücksetzen"
@@ -3303,6 +3467,7 @@ const App = () => {
                           );
                         })}
                       </tr>
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

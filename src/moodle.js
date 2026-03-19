@@ -632,14 +632,36 @@ export async function fetchInstituteGroups(baseUrl, token, institute, allCourseI
   if (groupsMap.size === 0) return [];
 
   const groups = [...groupsMap.values()];
+  const instClean = institute.replace(/\s+/g, '').toLowerCase();
+
+  // Gruppengrößen + Trainer-IDs pro Kurs ermitteln
   try {
     const memberships = await callMoodle(baseUrl, token, 'core_group_get_group_members', {
       groupids: groups.map(g => g.id),
     });
+
+    // Trainer-UserIDs pro Kurs laden (eine Abfrage pro eindeutigem Kurs)
+    const uniqueCourseIds = [...new Set(groups.map(g => g.courseId))];
+    const trainerIdsByCourse = new Map(); // courseId → Set<userId>
+    await Promise.all(uniqueCourseIds.map(async courseId => {
+      try {
+        const users = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', { courseid: courseId });
+        const trainerIds = new Set(
+          (Array.isArray(users) ? users : [])
+            .filter(u => u.username?.includes(`${instClean}-trainer-`))
+            .map(u => u.id)
+        );
+        trainerIdsByCourse.set(courseId, trainerIds);
+      } catch { trainerIdsByCourse.set(courseId, new Set()); }
+    }));
+
     if (Array.isArray(memberships)) {
       memberships.forEach(m => {
         const g = groups.find(x => x.id === m.groupid);
-        if (g) g.memberCount = (m.userids || []).length;
+        if (!g) return;
+        const allIds = m.userids || [];
+        const trainerIds = trainerIdsByCourse.get(g.courseId) || new Set();
+        g.memberCount = allIds.filter(id => !trainerIds.has(id)).length;
       });
     }
   } catch (e) {
