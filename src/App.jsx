@@ -1421,6 +1421,50 @@ const App = () => {
         newLocked[rowId] = new Set(existingPoolIds);
       });
 
+      // Auto-fill pool: ensure all courses referenced in newMatrix are in selectedPoolCourseIds
+      // and courseSlotCount is large enough to show them as matrix columns
+      const allNeededExtIds = [...new Set(Object.values(newMatrix).flat())];
+      const allExistingMoodleIds = new Set(
+        groups.flatMap(g => (g.existingCourseIds || []).map(Number))
+      );
+      const newPoolIds = [...config.selectedPoolCourseIds];
+      let newCourseSlotCount = config.courseSlotCount;
+      let poolChanged = false;
+
+      // 1. Add courses from courseDictionary that are needed but not yet in pool slots
+      for (const extId of allNeededExtIds) {
+        if (newPoolIds.some(id => String(id) === String(extId))) continue;
+        const emptySlot = newPoolIds.findIndex(id => !id || id === 'none');
+        if (emptySlot === -1) break;
+        newPoolIds[emptySlot] = extId;
+        newCourseSlotCount = Math.max(newCourseSlotCount, emptySlot + 1);
+        poolChanged = true;
+      }
+
+      // 2. Also handle courses in allMoodleCourses not in courseDictionary (Beta / direct Moodle)
+      const missingFromCatalog = [...allExistingMoodleIds].filter(mid =>
+        !courseDictionary.some(c => getMoodleId(c) === mid)
+      );
+      if (missingFromCatalog.length > 0 && allMoodleCourses.length > 0) {
+        for (const mid of missingFromCatalog) {
+          const course = allMoodleCourses.find(c => parseInt(String(c.id), 10) === mid);
+          if (!course) continue;
+          const moodleIdStr = String(course.id);
+          if (newPoolIds.some(id => String(id) === moodleIdStr)) continue;
+          const emptySlot = newPoolIds.findIndex(id => !id || id === 'none');
+          if (emptySlot === -1) break;
+          newPoolIds[emptySlot] = moodleIdStr;
+          newCourseSlotCount = Math.max(newCourseSlotCount, emptySlot + 1);
+          poolChanged = true;
+        }
+      }
+
+      if (poolChanged) {
+        const addedCount = newPoolIds.filter((id, i) => id !== config.selectedPoolCourseIds[i] && id !== 'none').length;
+        setConfig(prev => ({ ...prev, selectedPoolCourseIds: newPoolIds, courseSlotCount: newCourseSlotCount }));
+        if (addedCount > 0) addToast(`${addedCount} Kurs(e) automatisch in den Pool eingetragen.`, 'info', 4000);
+      }
+
       setMoodleGroups(groups);
       setSelectedMoodleGroupIds(new Set(groups.map(g => g.id)));
       setClassMatrix(newMatrix);
@@ -2461,6 +2505,125 @@ const App = () => {
     </ModalShell>
   );
 
+  const renderClassPoolModal = () => {
+    const prefix = config.institute?.trim() + '-';
+    const getMoodleId = c => {
+      const n = parseInt(String(c?.id ?? ''), 10);
+      if (!isNaN(n) && n > 0) return n;
+      if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) return parseInt(m[1], 10); }
+      return null;
+    };
+    const courseNameById = new Map([
+      ...courseDictionary.map(c => [getMoodleId(c), c.label]),
+      ...(allMoodleCourses.length > 0 ? allMoodleCourses.map(c => [parseInt(c.id, 10), c.label]) : []),
+    ].filter(([id]) => id));
+    const poolCourseByMoodleId = new Map(courseDictionary.map(c => [getMoodleId(c), c]));
+
+    return (
+      <ModalShell C={C} maxW="max-w-4xl" zIndex={115}>
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-b flex flex-wrap justify-between items-center gap-4 shrink-0">
+          <div className="flex items-center gap-3">
+            <div style={{ backgroundColor: C.accent1 }} className="p-2 text-white rounded-xl"><GraduationCap size={18} /></div>
+            <div>
+              <h3 style={{ color: C.text }} className="font-bold uppercase tracking-tight text-sm">Klassenübersicht</h3>
+              <p style={{ color: C.muted }} className="text-[9px] mt-0.5">{moodleGroups.length} Klasse(n) · {selectedMoodleGroupIds.size} ausgewählt</p>
+            </div>
+          </div>
+          <button onClick={() => setActiveModal(null)} style={{ color: C.muted }} className="p-2 hover:bg-black/10 rounded-full"><X size={20} /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-3 custom-scrollbar">
+          {moodleGroups.length === 0 ? (
+            <p style={{ color: C.muted }} className="text-center italic text-sm py-10">Keine Klassen geladen. Zuerst "Klassen laden" ausführen.</p>
+          ) : moodleGroups.map((g, i) => {
+            const rowId = i + 1;
+            const isSelected = selectedMoodleGroupIds.has(g.id);
+            const shortName = g.name.startsWith(prefix) ? g.name.slice(prefix.length) : g.name;
+            const existingMoodleIds = (g.existingCourseIds || []).map(Number);
+            const matrixIds = (classMatrix[rowId] || []).map(Number).map(id => isNaN(id) ? null : id).filter(Boolean);
+            const lockedIds = [...(lockedClassCourseMap[rowId] || new Set())];
+            const lockedMoodleIds = lockedIds.map(id => {
+              const c = courseDictionary.find(cc => String(cc.id) === String(id));
+              return c ? getMoodleId(c) : null;
+            }).filter(Boolean);
+            const additionalMatrixIds = matrixIds.filter(id => !lockedMoodleIds.includes(id));
+
+            return (
+              <div key={g.id} style={{ borderColor: isSelected ? C.accent1 : C.border, backgroundColor: isSelected ? C.accent1 + '08' : C.subtle }} className="rounded-2xl border p-4">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div style={{ backgroundColor: isSelected ? C.accent1 : C.muted, opacity: isSelected ? 1 : 0.4 }} className="w-2.5 h-2.5 rounded-full shrink-0 mt-0.5" />
+                    <div>
+                      <span style={{ color: C.text }} className="font-bold text-sm">{shortName}</span>
+                      <span style={{ color: C.muted }} className="text-[10px] ml-2">{g.name}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span style={{ backgroundColor: C.card, borderColor: C.border, color: C.text }} className="text-[10px] font-semibold px-2.5 py-1 rounded-full border flex items-center gap-1.5">
+                      <Users size={10} />{g.memberCount} Schüler
+                    </span>
+                    <span style={{ backgroundColor: isSelected ? C.accent1 + '20' : C.subtle, borderColor: isSelected ? C.accent1 : C.border, color: isSelected ? C.accent1 : C.muted }} className="text-[9px] font-bold px-2 py-1 rounded-full border uppercase">
+                      {isSelected ? 'Ausgewählt' : 'Nicht ausgewählt'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Bestehende Kurse */}
+                  <div>
+                    <p style={{ color: C.muted }} className="text-[9px] font-bold uppercase tracking-widest mb-1.5 flex items-center gap-1"><RefreshCw size={9} /> Bereits eingeschrieben ({existingMoodleIds.length})</p>
+                    {existingMoodleIds.length === 0 ? (
+                      <p style={{ color: C.muted }} className="text-[10px] italic">Keine bestehenden Einschreibungen</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {existingMoodleIds.map(id => {
+                          const name = courseNameById.get(id) || `Kurs-ID ${id}`;
+                          const poolCourse = poolCourseByMoodleId.get(id);
+                          const inPool = !!poolCourse;
+                          return (
+                            <div key={id} style={{ backgroundColor: inPool ? C.accent1 + '12' : C.card, borderColor: inPool ? C.accent1 + '40' : C.border }} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[10px]">
+                              {inPool ? <RefreshCw size={9} style={{ color: C.accent1 }} className="shrink-0" /> : <Eye size={9} style={{ color: C.muted }} className="shrink-0" />}
+                              <span style={{ color: inPool ? C.accent1 : C.text }} className="font-medium truncate">{name}</span>
+                              {!inPool && <span style={{ color: C.muted }} className="ml-auto shrink-0 italic">nicht im Pool</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Matrix-Zuweisung (zusätzliche) */}
+                  <div>
+                    <p style={{ color: C.muted }} className="text-[9px] font-bold uppercase tracking-widest mb-1.5 flex items-center gap-1"><Plus size={9} /> Neu zugewiesen ({additionalMatrixIds.length})</p>
+                    {additionalMatrixIds.length === 0 ? (
+                      <p style={{ color: C.muted }} className="text-[10px] italic">Keine weiteren Kurse zugewiesen</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {additionalMatrixIds.map(id => {
+                          const name = courseNameById.get(id) || `Kurs-ID ${id}`;
+                          return (
+                            <div key={id} style={{ backgroundColor: C.accent2 + '12', borderColor: C.accent2 + '40' }} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[10px]">
+                              <Check size={9} style={{ color: C.accent2 }} className="shrink-0" />
+                              <span style={{ color: C.accent2 }} className="font-medium truncate">{name}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-4 border-t flex justify-end shrink-0">
+          <button onClick={() => setActiveModal(null)} style={{ backgroundColor: C.accent1 }} className="text-white px-6 py-2 rounded-xl font-bold uppercase text-xs hover:brightness-110 active:scale-95 transition-all">Schließen</button>
+        </div>
+      </ModalShell>
+    );
+  };
+
   const renderCoursePreviewModal = () => (
     <ModalShell C={C} maxW="max-w-4xl" zIndex={110}>
       <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-5 border-b flex flex-wrap justify-between items-center gap-4 shrink-0">
@@ -2723,6 +2886,7 @@ const App = () => {
       {activeModal === 'help' && renderHelpModal()}
       {activeModal === 'settings' && renderSettingsModal()}
       {activeModal === 'history' && renderHistoryModal()}
+      {activeModal === 'classPool' && renderClassPoolModal()}
       {activeModal === 'coursePreview' && renderCoursePreviewModal()}
       {activeModal === 'institutePreview' && renderInstitutePreviewModal()}
       {showZohoTokenModal && renderZohoTokenModal()}
@@ -3132,9 +3296,14 @@ const App = () => {
                       <>
                         <div className="flex items-center justify-between mb-2">
                           <span style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">{moodleGroups.length} Klasse(n)</span>
-                          <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1">
-                            <X size={10} /> Zurücksetzen
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => setActiveModal('classPool')} style={{ color: C.accent1 }} className="text-[9px] hover:opacity-70 flex items-center gap-1 font-semibold">
+                              <Eye size={10} /> Details
+                            </button>
+                            <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1">
+                              <X size={10} /> Zurücksetzen
+                            </button>
+                          </div>
                         </div>
                         <div className="space-y-1 max-h-40 overflow-y-auto custom-scrollbar">
                           {moodleGroups.map(g => {
