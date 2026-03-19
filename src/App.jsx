@@ -535,12 +535,12 @@ const App = () => {
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
-    if (config.moodleBetaEnabled) return; // Beta-Modus: Kurse kommen direkt von Moodle
+    if (config.moodleBetaEnabled) return; // Moodle-Modus: Kurse kommen direkt von Moodle
+    if (!config.courseApiUrl?.trim()) return; // keine URL konfiguriert → Cache bleibt erhalten
     setIsLoadingPool(true);
     try {
-      const r = await fetch(config.courseApiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request: 'get_courses' }) });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const raw = await r.json();
+      const text = await invoke('http_post_json', { url: config.courseApiUrl, body: JSON.stringify({ request: 'get_courses' }) });
+      const raw = JSON.parse(text);
       const items = Array.isArray(raw) ? raw : Array.isArray(raw?.value) ? raw.value : [];
       const normalized = items.map((item, i) => {
         const rawId = findValueByPattern(item, ['id', 'guid', 'key', 'ident']) || `c-${i}`;
@@ -2183,24 +2183,129 @@ const App = () => {
           </>}
           {/* ── Backend ───────────────────────────────────────────── */}
           {settingsTab === 'backend' && <>
+            {/* ── Kursquelle Toggle ── */}
             <div>
-              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Upload size={14} /> Power Automate URLs</h4>
-              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Wird gespeichert und bleibt beim Neustart erhalten.</p>
-              <div className="space-y-3">
-                {[
-                  { label: 'Kursliste', name: 'courseApiUrl' },
-                  { label: 'SharePoint Export', name: 'sharepointUrl' },
-                ].map(f => (
-                  <div key={f.name} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
-                    <input type="text" value={config[f.name]}
-                      onChange={e => setConfig(p => ({ ...p, [f.name]: e.target.value }))}
-                      style={{ color: C.text, backgroundColor: 'transparent' }}
-                      className="w-full text-[10px] font-mono outline-none" />
-                  </div>
-                ))}
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-2"><BookOpen size={14} /> Kursquelle</h4>
+              <div style={{ borderColor: C.border }} className="flex rounded-xl border overflow-hidden">
+                <button
+                  onClick={() => { setConfig(p => ({ ...p, moodleBetaEnabled: false })); }}
+                  style={{ backgroundColor: !config.moodleBetaEnabled ? C.accent1 : C.subtle, color: !config.moodleBetaEnabled ? '#fff' : C.muted }}
+                  className="flex-1 py-2 text-[10px] font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all"
+                >
+                  <Upload size={11} /> Excel-Liste (Power Automate)
+                </button>
+                <button
+                  onClick={() => setConfig(p => ({ ...p, moodleBetaEnabled: true }))}
+                  style={{ backgroundColor: config.moodleBetaEnabled ? C.accent1 : C.subtle, color: config.moodleBetaEnabled ? '#fff' : C.muted }}
+                  className="flex-1 py-2 text-[10px] font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all"
+                >
+                  <GraduationCap size={11} /> Moodle direkt
+                </button>
               </div>
             </div>
+
+            {!config.moodleBetaEnabled ? (
+              /* ── Power Automate ── */
+              <div>
+                <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Kursliste und SharePoint-Export werden über Power Automate abgerufen.</p>
+                <div className="space-y-3">
+                  {[
+                    { label: 'Kursliste (POST)', name: 'courseApiUrl' },
+                    { label: 'SharePoint Export', name: 'sharepointUrl' },
+                  ].map(f => (
+                    <div key={f.name} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                      <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
+                      <input type="text" value={config[f.name]}
+                        onChange={e => setConfig(p => ({ ...p, [f.name]: e.target.value }))}
+                        placeholder="https://prod-xx.logic.azure.com/…"
+                        style={{ color: C.text, backgroundColor: 'transparent' }}
+                        className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={fetchCoursePool}
+                  disabled={isLoadingPool || !config.courseApiUrl?.trim()}
+                  style={{ color: C.accent1, borderColor: C.accent1 + '40' }}
+                  className="mt-3 flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase hover:opacity-80 disabled:opacity-40 transition-all"
+                >
+                  <RefreshCw size={12} className={isLoadingPool ? 'animate-spin' : ''} />
+                  Kursliste neu laden ({courseDictionary.length} gecacht)
+                </button>
+              </div>
+            ) : (
+              /* ── Moodle Kurskatalog ── */
+              <div className="space-y-3">
+                <p style={{ color: C.muted }} className="text-[10px] opacity-60">Kurse werden direkt von Moodle abgerufen. Wähle aus, welche Kurse in der Matrix erscheinen sollen.</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={fetchMoodleCoursesCatalog}
+                    disabled={isLoadingMoodleCourses}
+                    style={{ color: C.accent2, borderColor: C.accent2 + '40' }}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase hover:opacity-80 disabled:opacity-50 transition-all"
+                  >
+                    <RefreshCw size={12} className={isLoadingMoodleCourses ? 'animate-spin' : ''} />
+                    Kurse laden
+                  </button>
+                  {allMoodleCourses.length > 0 && (
+                    <span style={{ color: C.muted }} className="text-[10px]">
+                      {allMoodleCourses.length} verfügbar · <strong style={{ color: C.text }}>{(config.moodleBetaCourseIds ?? []).length} ausgewählt</strong>
+                    </span>
+                  )}
+                </div>
+                {allMoodleCourses.length > 0 && (
+                  <>
+                    <input
+                      type="text"
+                      value={moodleBetaSearch}
+                      onChange={e => setMoodleBetaSearch(e.target.value)}
+                      placeholder="Kurs suchen…"
+                      style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }}
+                      className="w-full px-3 py-2 rounded-lg border text-[11px] outline-none placeholder:opacity-40"
+                    />
+                    <div style={{ borderColor: C.border }} className="border rounded-xl overflow-auto max-h-60">
+                      {(() => {
+                        const search = moodleBetaSearch.toLowerCase();
+                        const filtered = allMoodleCourses.filter(c =>
+                          !search || c.label.toLowerCase().includes(search) || c.tag.toLowerCase().includes(search) || c.id.includes(search)
+                        );
+                        const groups = {};
+                        filtered.forEach(c => { const cat = c.tag || 'Ohne Kategorie'; if (!groups[cat]) groups[cat] = []; groups[cat].push(c); });
+                        return Object.entries(groups).map(([cat, courses]) => (
+                          <div key={cat}>
+                            <div style={{ backgroundColor: C.subtle, color: C.muted, borderColor: C.border }} className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest border-b sticky top-0">
+                              {cat} <span className="opacity-50">({courses.length})</span>
+                            </div>
+                            {courses.map(c => {
+                              const selected = (config.moodleBetaCourseIds ?? []).includes(c.id);
+                              return (
+                                <button
+                                  key={c.id}
+                                  onClick={() => {
+                                    const ids = config.moodleBetaCourseIds ?? [];
+                                    setConfig(p => ({ ...p, moodleBetaCourseIds: selected ? ids.filter(id => id !== c.id) : [...ids, c.id] }));
+                                  }}
+                                  style={{ borderColor: C.border, backgroundColor: selected ? (C.accent2 + '15') : 'transparent' }}
+                                  className="w-full flex items-center gap-3 px-3 py-2 border-b last:border-0 hover:bg-black/5 transition-colors text-left"
+                                >
+                                  <span style={{ color: selected ? C.accent2 : C.muted }}>{selected ? <CheckSquare size={14} /> : <Square size={14} />}</span>
+                                  <span style={{ color: C.muted }} className="text-[9px] font-mono w-10 shrink-0">#{c.id}</span>
+                                  <span style={{ color: C.text }} className="text-[11px] flex-1 font-medium">{c.label}</span>
+                                  <span style={{ color: C.muted }} className="text-[9px] font-mono">{c.shorthand}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </>
+                )}
+                {allMoodleCourses.length === 0 && !isLoadingMoodleCourses && (
+                  <p style={{ color: C.muted }} className="text-[10px] italic opacity-60">Noch keine Kurse geladen — klicke auf „Kurse laden".</p>
+                )}
+              </div>
+            )}
             <div className="mt-4">
               <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
                 <GraduationCap size={14} /> Moodle REST API
@@ -2295,109 +2400,6 @@ const App = () => {
 
           {/* ── Anpassen ──────────────────────────────────────────── */}
           {settingsTab === 'anpassen' && <>
-            {/* ── Kurspool aus Moodle ──────────────────────────── */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
-                  <FlaskConical size={14} /> Kurspool aus Moodle
-                </h4>
-                <button
-                  onClick={() => {
-                    const newVal = !config.moodleBetaEnabled;
-                    setConfig(p => ({ ...p, moodleBetaEnabled: newVal }));
-                    if (!newVal) fetchCoursePool();
-                  }}
-                  style={{ backgroundColor: config.moodleBetaEnabled ? C.accent2 : C.border }}
-                  className="relative w-9 h-5 rounded-full transition-colors"
-                >
-                  <span style={{ backgroundColor: '#fff', transform: config.moodleBetaEnabled ? 'translateX(16px)' : 'translateX(2px)' }} className="absolute top-0.5 w-4 h-4 rounded-full shadow transition-transform block" />
-                </button>
-              </div>
-              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">
-                {config.moodleBetaEnabled
-                  ? 'Kurse werden direkt von Moodle abgerufen. Wähle unten aus, welche Kurse in der Matrix-Dropdown erscheinen sollen.'
-                  : 'Wenn aktiv: Kursliste direkt von Moodle statt Power Automate. Power Automate bleibt weiterhin für SharePoint genutzt.'}
-              </p>
-              {config.moodleBetaEnabled && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={fetchMoodleCoursesCatalog}
-                      disabled={isLoadingMoodleCourses}
-                      style={{ color: C.accent2 }}
-                      className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 rounded-lg text-xs font-bold uppercase hover:bg-emerald-100 disabled:opacity-50 transition-colors"
-                    >
-                      <RefreshCw size={14} className={isLoadingMoodleCourses ? 'animate-spin' : ''} />
-                      Kurse laden
-                    </button>
-                    {allMoodleCourses.length > 0 && (
-                      <span style={{ color: C.muted }} className="text-[10px]">
-                        {allMoodleCourses.length} Kurse verfügbar · <strong style={{ color: C.text }}>{(config.moodleBetaCourseIds ?? []).length} ausgewählt</strong>
-                      </span>
-                    )}
-                  </div>
-                  {allMoodleCourses.length > 0 && (
-                    <>
-                      <input
-                        type="text"
-                        value={moodleBetaSearch}
-                        onChange={e => setMoodleBetaSearch(e.target.value)}
-                        placeholder="Kurs suchen…"
-                        style={{ backgroundColor: C.subtle, borderColor: C.border, color: C.text }}
-                        className="w-full px-3 py-2 rounded-lg border text-[11px] outline-none placeholder:opacity-40"
-                      />
-                      <div style={{ borderColor: C.border }} className="border rounded-xl overflow-auto max-h-72">
-                        {(() => {
-                          const search = moodleBetaSearch.toLowerCase();
-                          const filtered = allMoodleCourses.filter(c =>
-                            !search || c.label.toLowerCase().includes(search) || c.tag.toLowerCase().includes(search) || c.id.includes(search)
-                          );
-                          const groups = {};
-                          filtered.forEach(c => {
-                            const cat = c.tag || 'Ohne Kategorie';
-                            if (!groups[cat]) groups[cat] = [];
-                            groups[cat].push(c);
-                          });
-                          return Object.entries(groups).map(([cat, courses]) => (
-                            <div key={cat}>
-                              <div style={{ backgroundColor: C.subtle, color: C.muted, borderColor: C.border }} className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest border-b sticky top-0">
-                                {cat} <span className="opacity-50">({courses.length})</span>
-                              </div>
-                              {courses.map(c => {
-                                const selected = (config.moodleBetaCourseIds ?? []).includes(c.id);
-                                return (
-                                  <button
-                                    key={c.id}
-                                    onClick={() => {
-                                      const ids = config.moodleBetaCourseIds ?? [];
-                                      const newIds = selected ? ids.filter(id => id !== c.id) : [...ids, c.id];
-                                      setConfig(p => ({ ...p, moodleBetaCourseIds: newIds }));
-                                    }}
-                                    style={{ borderColor: C.border, backgroundColor: selected ? (C.accent2 + '15') : 'transparent' }}
-                                    className="w-full flex items-center gap-3 px-3 py-2 border-b last:border-0 hover:bg-black/5 transition-colors text-left"
-                                  >
-                                    <span style={{ color: selected ? C.accent2 : C.muted }}>
-                                      {selected ? <CheckSquare size={14} /> : <Square size={14} />}
-                                    </span>
-                                    <span style={{ color: C.muted }} className="text-[9px] font-mono w-10 shrink-0">#{c.id}</span>
-                                    <span style={{ color: C.text }} className="text-[11px] flex-1 font-medium">{c.label}</span>
-                                    <span style={{ color: C.muted }} className="text-[9px] font-mono">{c.shorthand}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ));
-                        })()}
-                      </div>
-                    </>
-                  )}
-                  {allMoodleCourses.length === 0 && !isLoadingMoodleCourses && (
-                    <p style={{ color: C.muted }} className="text-[10px] italic opacity-60">Noch keine Kurse geladen — klicke auf „Kurse laden".</p>
-                  )}
-                </div>
-              )}
-            </div>
-
             {/* Tag-Zuordnung */}
             {(() => {
               const uniqueTags = [...new Set(courseDictionary.map(c => c.tag).filter(Boolean))].sort();

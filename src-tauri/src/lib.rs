@@ -172,6 +172,26 @@ async fn zoho_api_post(
     Ok(resp_body)
 }
 
+/// Generischer POST-Request (JSON-Body), umgeht CORS im Webview.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn http_post_json(url: String, body: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if status >= 400 {
+        return Err(format!("HTTP {}: {}", status, text));
+    }
+    Ok(text)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -186,7 +206,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, zoho_exchange_token, zoho_api_get, zoho_api_post, zoho_get_all_accounts])
+        .invoke_handler(tauri::generate_handler![greet, zoho_exchange_token, zoho_api_get, zoho_api_post, zoho_get_all_accounts, http_post_json])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
