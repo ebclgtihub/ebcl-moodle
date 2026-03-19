@@ -12,7 +12,9 @@
  *  - Token hat Berechtigungen für:
  *    core_user_create_users, core_user_get_users_by_field,
  *    enrol_manual_enrol_users, core_group_create_groups,
- *    core_group_get_course_groups, core_group_add_group_members
+ *    core_group_get_course_groups, core_group_get_group_members, core_group_add_group_members,
+ *    core_cohort_search_cohorts, core_cohort_create_cohorts, core_cohort_add_cohort_members,
+ *    core_enrol_get_enrolled_users, core_enrol_get_users_courses
  *  - Kurs-URLs im Format "…/course/view.php?id=<nummer>" ODER
  *    numerische Kurs-IDs im id-Feld des Kurs-Pools
  */
@@ -121,7 +123,6 @@ export async function enrollInMoodle({
   config,
   getClassLabel,
   onProgress,
-  enrolMode = 'update',
 }) {
   const report = (label, pct) => onProgress?.(label, pct);
 
@@ -201,7 +202,20 @@ export async function enrollInMoodle({
             usersCreated++;
           }
         } catch (singleErr) {
-          console.error(`[Moodle] core_user_create_users (${user.username}) fehlgeschlagen:`, singleErr.message);
+          // Erstellung fehlgeschlagen — User existiert möglicherweise bereits (z.B. wenn Schritt 1a
+          // fehlgeschlagen ist und die Vorprüfung den Account nicht gefunden hat).
+          // Nochmals per Lookup suchen, damit der Account trotzdem eingeschrieben werden kann.
+          try {
+            const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: [user.username] });
+            if (Array.isArray(found) && found[0]) {
+              userIdMap[found[0].username] = found[0].id;
+            } else {
+              warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
+            }
+          } catch (lookupErr) {
+            console.error(`[Moodle] ${user.username}: weder anlegen noch finden:`, lookupErr.message);
+            warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
+          }
         }
       }
     }
@@ -228,7 +242,7 @@ export async function enrollInMoodle({
       const hasStudents = generatedData.some(
         u =>
           !u.isT &&
-          u.cNum === String(r.id).padStart(2, '0') &&
+          u.cLabel === classLabelById[r.id] &&
           u.courses.some(uc => extractMoodleCourseId(uc) === course.moodleId)
       );
       if (hasStudents) {
@@ -255,7 +269,8 @@ export async function enrollInMoodle({
         existing.forEach(g => {
           const key = `${courseid}:${g.name}`;
           if (groupsNeededMap.has(key)) groupIdMap[key] = g.id;
-          if (enrolMode === 'new' && g.name?.toLowerCase().startsWith(institutePrefix))
+          // Institutsgruppen immer sammeln — Trainer brauchen sie in beiden Modi
+          if (g.name?.toLowerCase().startsWith(institutePrefix))
             allExistingGroupIds.push(g.id);
         });
       }
@@ -275,7 +290,7 @@ export async function enrollInMoodle({
         if (Array.isArray(created)) {
           created.forEach(g => {
             groupIdMap[`${g.courseid}:${g.name}`] = g.id;
-            if (enrolMode === 'new') allExistingGroupIds.push(g.id);
+            allExistingGroupIds.push(g.id); // immer — Trainer brauchen neue Gruppen in beiden Modi
           });
         }
       } catch (e) {
@@ -304,10 +319,13 @@ export async function enrollInMoodle({
         });
       });
     } else {
-      // Schüler: in ihre zugewiesenen Kurse mit Rolle 5 (student)
+      // Schüler: nur in Kurse einschreiben die in activeMatrixCourses sind.
+      // Kurs-IDs aus Anreicherung (fetchFullEnrollments) werden ignoriert —
+      // sonst würden historische Kurse mit neuen Zeiträumen überschrieben.
+      const activeMoodleIds = new Set(coursesWithIds.map(c => c.moodleId));
       userData.courses.forEach(course => {
         const moodleId = extractMoodleCourseId(course);
-        if (!moodleId) return;
+        if (!moodleId || !activeMoodleIds.has(moodleId)) return;
         enrolments.push({
           roleid: 5,
           userid: userId,
@@ -320,7 +338,34 @@ export async function enrollInMoodle({
   });
 
   if (enrolments.length > 0) {
-    await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments });
+    let failedEnrolments = [];
+    try {
+      await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments });
+    } catch (bulkErr) {
+      // Bulk fehlgeschlagen → jeden Eintrag einzeln versuchen, bis zu 3 Versuche
+      warnings.push(`Bulk-Einschreibung fehlgeschlagen (${bulkErr.message}) — versuche einzeln…`);
+      for (const enrolment of enrolments) {
+        let success = false;
+        for (let attempt = 1; attempt <= 3 && !success; attempt++) {
+          try {
+            await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: [enrolment] });
+            success = true;
+          } catch {
+            // nach 3 Fehlversuchen als gescheitert markieren
+          }
+        }
+        if (!success) failedEnrolments.push(enrolment);
+      }
+    }
+    if (failedEnrolments.length > 0) {
+      const failedUserIds = [...new Set(failedEnrolments.map(e => e.userid))];
+      // Username rückauflösen für lesbare Fehlermeldung
+      const failedNames = failedUserIds.map(id => Object.keys(userIdMap).find(u => userIdMap[u] === id) ?? `ID ${id}`);
+      throw new Error(
+        `Einschreibung fehlgeschlagen für: ${failedNames.join(', ')}. ` +
+        `Bitte Moodle-Berechtigungen und Kurs-IDs prüfen.`
+      );
+    }
   }
 
   // ── Schritt 4: Gruppen zuordnen ────────────────────────────────────────────
@@ -332,11 +377,8 @@ export async function enrollInMoodle({
     if (!userId) return;
 
     if (userData.isT) {
-      // Trainer: zu ALLEN Gruppen aller Kurse hinzufügen
-      // Im Neu-Anlegen-Modus auch bestehende Gruppen aus früheren Sessions
-      const trainerGroupIds = enrolMode === 'new'
-        ? [...new Set(allExistingGroupIds)]
-        : Object.values(groupIdMap);
+      // Trainer: zu ALLEN Institutsgruppen aller Kurse hinzufügen (beide Modi)
+      const trainerGroupIds = [...new Set(allExistingGroupIds)];
       trainerGroupIds.forEach(groupId => {
         groupMembers.push({ groupid: groupId, userid: userId });
       });
@@ -345,8 +387,7 @@ export async function enrollInMoodle({
       userData.courses.forEach(course => {
         const moodleId = extractMoodleCourseId(course);
         if (!moodleId) return;
-        const classId = parseInt(userData.cNum, 10);
-        const groupName = classLabelById[classId];
+        const groupName = userData.cLabel;
         if (!groupName) return;
         const groupId = groupIdMap[`${moodleId}:${groupName}`];
         if (groupId) groupMembers.push({ groupid: groupId, userid: userId });
@@ -357,8 +398,16 @@ export async function enrollInMoodle({
   if (groupMembers.length > 0) {
     try {
       await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: groupMembers });
-    } catch (e) {
-      warnings.push(`Gruppen-Zuweisung teilweise fehlgeschlagen: ${e.message}`);
+    } catch (bulkErr) {
+      // Bulk fehlgeschlagen → einzeln versuchen
+      warnings.push(`Bulk-Gruppenzuweisung fehlgeschlagen (${bulkErr.message}). Versuche einzeln…`);
+      for (const member of groupMembers) {
+        try {
+          await callMoodle(baseUrl, token, 'core_group_add_group_members', { members: [member] });
+        } catch (e) {
+          warnings.push(`Gruppenzuweisung für User-ID ${member.userid} in Gruppe ${member.groupid} fehlgeschlagen: ${e.message}`);
+        }
+      }
     }
   }
 
@@ -437,59 +486,187 @@ export async function enrollInMoodle({
     cohortCreated,
     cohortMembersAdded: cohortId ? Object.keys(userIdMap).length : 0,
     warnings,
+    userIdMap,
   };
 }
 
 /**
  * Ermittelt die höchsten vorhandenen Student/Trainer/Klassen-Nummern
  * für ein Institut, damit bei "Neu anlegen" fortlaufend nummeriert werden kann.
+ *
+ * Gibt zusätzlich `orphanUsernames` zurück: Accounts die in Moodle existieren,
+ * aber in keinem der aktiven Kurse eingeschrieben sind ("Geister-Accounts").
+ * Diese können entstehen wenn ein früherer Einschreibungsversuch fehlgeschlagen ist.
  */
 
+/**
+ * @param {number[]} activeCourseIds – Kurse der aktuellen Matrix (für Enrollment-Check)
+ */
 export async function findMaxNumbers(baseUrl, token, instClean, activeCourseIds = []) {
   let maxStudent = 0;
   let maxTrainer = 0;
-  let maxClass = 0;
+  let foundUsers = [];
 
-  // Single API call with all possible usernames.
-  // Students use 3-digit padding (001–999), trainers go up to 99 — both natural limits.
-  // One roundtrip is better than multiple batched calls.
+  // Zwei getrennte Calls — verhindert Überschreitung von PHP max_input_vars (Default: 1000).
+  const studentCandidates = [];
+  for (let i = 1; i <= 999; i++)
+    studentCandidates.push(`${instClean}-student-${String(i).padStart(3, '0')}`);
+
+  const trainerCandidates = [];
+  for (let t = 1; t <= 99; t++)
+    trainerCandidates.push(`${instClean}-trainer-${t}`);
+
+  const [studentResult, trainerResult] = await Promise.allSettled([
+    callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: studentCandidates }),
+    callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: trainerCandidates }),
+  ]);
+  if (studentResult.status === 'fulfilled' && Array.isArray(studentResult.value)) foundUsers.push(...studentResult.value);
+  if (trainerResult.status === 'fulfilled' && Array.isArray(trainerResult.value)) foundUsers.push(...trainerResult.value);
+  if (studentResult.status === 'rejected') console.warn('[Moodle] findMaxNumbers: student lookup failed:', studentResult.reason?.message);
+  if (trainerResult.status === 'rejected') console.warn('[Moodle] findMaxNumbers: trainer lookup failed:', trainerResult.reason?.message);
+
+  // Enrollment-IDs aus aktiven Kursen (für maxStudent/maxTrainer — nur eingeschriebene zählen)
+  const enrolledUserIds = new Set();
+  let enrollmentFetchSucceeded = false;
+  for (const courseid of activeCourseIds) {
+    try {
+      const enrolled = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', { courseid });
+      enrollmentFetchSucceeded = true;
+      if (Array.isArray(enrolled)) {
+        enrolled.forEach(u => { if (u.id) enrolledUserIds.add(u.id); });
+      }
+    } catch (e) {
+      console.warn('[Moodle] findMaxNumbers: enrollment fetch failed:', e.message);
+    }
+  }
+
+  // Nur eingeschriebene Accounts zählen für maxStudent/maxTrainer.
+  // Fallback auf alle foundUsers wenn kein Enrollment-Fetch geklappt hat
+  // (z.B. fehlende Berechtigung) — verhindert dass maxStudent fälschlicherweise 0 wird.
+  const enrolledUsers = (activeCourseIds.length > 0 && enrollmentFetchSucceeded)
+    ? foundUsers.filter(u => u.id && enrolledUserIds.has(u.id))
+    : foundUsers;
+
+  enrolledUsers.forEach(u => {
+    const sm = u.username?.match(/-student-(\d+)$/i);
+    if (sm) maxStudent = Math.max(maxStudent, parseInt(sm[1], 10));
+    const tm = u.username?.match(/-trainer-(\d+)$/i);
+    if (tm) maxTrainer = Math.max(maxTrainer, parseInt(tm[1], 10));
+  });
+
+  // Geister-Accounts nur melden wenn Enrollment-Fetch erfolgreich war.
+  // Sonst ist enrolledUserIds leer → alle foundUsers wären fälschlich als Geister markiert.
+  const orphanUsernames = (activeCourseIds.length > 0 && enrollmentFetchSucceeded)
+    ? foundUsers.filter(u => u.id && !enrolledUserIds.has(u.id)).map(u => u.username)
+    : [];
+
+  return { maxStudent, maxTrainer, orphanUsernames };
+}
+
+/**
+ * Reichert generatedData mit den tatsächlichen Kurseinschreibungen aus Moodle an.
+ * Nützlich nach einem Aktualisieren-Lauf: bestehende User haben evtl. mehr Kurse
+ * als in der aktuellen Generation konfiguriert wurde.
+ *
+ * @param {string}   baseUrl          - Moodle-Basis-URL
+ * @param {string}   token            - Moodle Web Service Token
+ * @param {object[]} generatedData    - Account-Daten aus generateList
+ * @param {object}   userIdMap        - username → Moodle-User-ID (aus enrollInMoodle)
+ * @param {object[]} courseDictionary - Alle bekannten Kurse der App (mit id, label, shorthand, url)
+ * @returns {Promise<object[]>}       - Angereichertes generatedData
+ */
+export async function fetchFullEnrollments(baseUrl, token, generatedData, userIdMap, courseDictionary) {
+  const courseById = {};
+  courseDictionary.forEach(c => { courseById[String(c.id)] = c; });
+
+  const enriched = await Promise.all(generatedData.map(async (d) => {
+    const userId = userIdMap?.[d.user?.trim().toLowerCase()];
+    if (!userId) return d;
+    try {
+      const moodleCourses = await callMoodle(baseUrl, token, 'core_enrol_get_users_courses', { userid: userId });
+      if (Array.isArray(moodleCourses)) {
+        if (moodleCourses.length === 0) {
+          // User existiert in Moodle aber ist in keinem Kurs → Einschreibung fehlgeschlagen
+          return { ...d, courses: [] };
+        }
+        const fullCourses = moodleCourses.map(c => courseById[String(c.id)]).filter(Boolean);
+        if (fullCourses.length > 0) return { ...d, courses: fullCourses };
+        // Kurse vorhanden aber keiner im App-Pool → Session-Kurse behalten
+      }
+    } catch (e) {
+      // Fehlende Berechtigung → sofort re-throwen damit äußerer catch den Toast zeigt.
+      // Einzelne Netzwerkfehler still überspringen.
+      if (e.message === 'Access control exception') throw e;
+      console.warn('[Moodle] fetchFullEnrollments: failed for', d.user, e.message);
+    }
+    return d;
+  }));
+  return enriched;
+}
+
+/**
+ * Lädt alle Klassen-Gruppen eines Instituts aus den angegebenen Kursen.
+ * Gibt [{id, name, courseId, memberCount}] zurück, sortiert nach Name.
+ */
+export async function fetchInstituteGroups(baseUrl, token, institute, allCourseIds) {
+  const prefix = institute.trim() + '-';
+  const groupsMap = new Map(); // name → {id, name, courseId, existingCourseIds: Set}
+
+  for (const courseId of allCourseIds) {
+    try {
+      const groups = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid: courseId });
+      if (!Array.isArray(groups)) continue;
+      for (const g of groups) {
+        if (!g.name.startsWith(prefix)) continue;
+        if (!groupsMap.has(g.name)) {
+          groupsMap.set(g.name, { id: g.id, name: g.name, courseId, existingCourseIds: new Set([courseId]), memberCount: 0 });
+        } else {
+          groupsMap.get(g.name).existingCourseIds.add(courseId);
+        }
+      }
+    } catch (e) {
+      console.warn(`[Moodle] fetchInstituteGroups: Kurs ${courseId}:`, e.message);
+    }
+  }
+
+  if (groupsMap.size === 0) return [];
+
+  const groups = [...groupsMap.values()];
   try {
-    const candidates = [];
-    for (let i = 1; i <= 999; i++)
-      candidates.push(`${instClean}-student-${String(i).padStart(3, '0')}`);
-    for (let t = 1; t <= 99; t++)
-      candidates.push(`${instClean}-trainer-${t}`);
-
-    const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: candidates });
-    if (Array.isArray(found)) {
-      found.forEach(u => {
-        const sm = u.username?.match(/-student-(\d+)$/i);
-        if (sm) maxStudent = Math.max(maxStudent, parseInt(sm[1], 10));
-        const tm = u.username?.match(/-trainer-(\d+)$/i);
-        if (tm) maxTrainer = Math.max(maxTrainer, parseInt(tm[1], 10));
+    const memberships = await callMoodle(baseUrl, token, 'core_group_get_group_members', {
+      groupids: groups.map(g => g.id),
+    });
+    if (Array.isArray(memberships)) {
+      memberships.forEach(m => {
+        const g = groups.find(x => x.id === m.groupid);
+        if (g) g.memberCount = (m.userids || []).length;
       });
     }
   } catch (e) {
-    console.warn('[Moodle] findMaxNumbers: user lookup failed:', e.message);
+    console.warn('[Moodle] fetchInstituteGroups: Mitgliederanzahl fehlgeschlagen:', e.message);
   }
 
-  // Find max class number across ALL active courses (classes may not appear in every course).
-  const numRe = /-(\d+)$/;
-  for (const courseid of activeCourseIds) {
-    try {
-      const groups = await callMoodle(baseUrl, token, 'core_group_get_course_groups', { courseid });
-      if (Array.isArray(groups)) {
-        groups.forEach(g => {
-          const match = g.name?.match(numRe);
-          if (match) maxClass = Math.max(maxClass, parseInt(match[1], 10));
-        });
-      }
-    } catch (e) {
-      console.warn('[Moodle] findMaxNumbers: group fetch failed:', e.message);
-    }
-  }
+  // Set → Array für Serialisierung
+  return groups
+    .map(g => ({ ...g, existingCourseIds: [...g.existingCourseIds] }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+}
 
-  return { maxStudent, maxTrainer, maxClass };
+/**
+ * Lädt alle eingeschriebenen Nutzer einer Gruppe aus einem Kurs.
+ * Gibt User-Objekte zurück (mit username, firstname, lastname, email).
+ */
+export async function fetchGroupMembers(baseUrl, token, courseId, groupId) {
+  try {
+    const users = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', {
+      courseid: courseId,
+      options: [{ name: 'groupid', value: groupId }],
+    });
+    return Array.isArray(users) ? users : [];
+  } catch (e) {
+    console.warn(`[Moodle] fetchGroupMembers: Gruppe ${groupId}:`, e.message);
+    return [];
+  }
 }
 
 /**

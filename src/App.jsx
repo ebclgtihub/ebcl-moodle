@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
-import { enrollInMoodle, fetchMoodleCourses, findMaxNumbers } from './moodle';
+import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
@@ -61,13 +61,13 @@ const DEFAULT_CONFIG = {
   courseSlotCount: 1,
   selectedPoolCourseIds: Array(8).fill('none'),
   classCustomSizes: {},
-  courseApiUrl: '***ENTFERNT***',
-  sharepointUrl: '***ENTFERNT***',
-  moodleUrl: 'https://world.ebcl.eu',
-  moodleToken: '***ENTFERNT***',
-  zohoClientId: '***ENTFERNT***',
-  zohoClientSecret: '***ENTFERNT***',
-  zohoRefreshToken: 'ENTFERNT',
+  courseApiUrl: '',
+  sharepointUrl: '',
+  moodleUrl: '',
+  moodleToken: '',
+  zohoClientId: '',
+  zohoClientSecret: '',
+  zohoRefreshToken: '',
   customAccents: ['#ab0325', '#153d61', '#f59e0b', '#00664f'],
   tagColorMap: { 'Schule': 0, 'Test': 1 },
   moodleBetaEnabled: false,
@@ -109,9 +109,9 @@ const Toast = ({ toasts, removeToast }) => (
   <div className="fixed bottom-5 right-5 z-[999] flex flex-col gap-2 pointer-events-none">
     {toasts.map(t => (
       <div key={t.id} className={`flex items-center gap-3 px-4 py-3 rounded-2xl shadow-xl text-white text-xs font-semibold pointer-events-auto
-        ${t.type === 'error' ? 'bg-rose-600' : t.type === 'success' ? 'bg-emerald-600' : 'bg-slate-700'}`}
+        ${t.type === 'error' ? 'bg-rose-600' : t.type === 'success' ? 'bg-emerald-600' : t.type === 'warning' ? 'bg-amber-600' : 'bg-slate-700'}`}
         style={{ animation: 'slideInRight 0.25s ease' }}>
-        {t.type === 'error' ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+        {t.type === 'error' ? <AlertTriangle size={14} /> : t.type === 'warning' ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
         <span>{t.message}</span>
         <button onClick={() => removeToast(t.id)} className="ml-1 opacity-70 hover:opacity-100"><X size={12} /></button>
       </div>
@@ -218,6 +218,11 @@ const App = () => {
   const [settingsTab, setSettingsTab] = useState('allgemein');
   const [enrolMode, setEnrolMode] = useState('update'); // 'update' | 'new'
   const [isFindingMaxNumbers, setIsFindingMaxNumbers] = useState(false);
+  const [selectedUpdateClassIds, setSelectedUpdateClassIds] = useState(new Set());
+  const [moodleGroups, setMoodleGroups] = useState([]); // [{id, name, courseId, existingCourseIds, memberCount}]
+  const [isLoadingMoodleGroups, setIsLoadingMoodleGroups] = useState(false);
+  const [selectedMoodleGroupIds, setSelectedMoodleGroupIds] = useState(new Set());
+  const [lockedClassCourseMap, setLockedClassCourseMap] = useState({}); // rowId → Set<courseId string>
   const [editingClassSizeId, setEditingClassSizeId] = useState(null);
   const [editingClassSizeVal, setEditingClassSizeVal] = useState('');
   const [showSessionResetConfirm, setShowSessionResetConfirm] = useState(false);
@@ -602,6 +607,18 @@ const App = () => {
   }, [config.classCounts, config.classSizes, config.trainerCount]);
 
   const classRows = useMemo(() => {
+    if (enrolMode === 'update' && moodleGroups.length > 0) {
+      return moodleGroups.map((g, i) => ({
+        id: i + 1,
+        size: g.memberCount,
+        typeIdx: 0,
+        defaultSize: g.memberCount,
+        groupName: g.name,
+        moodleGroupId: g.id,
+        courseId: g.courseId,
+        existingCourseIds: g.existingCourseIds || [],
+      }));
+    }
     const rows = []; let id = 1;
     [0, 1, 2, 3].forEach(idx => {
       for (let i = 0; i < config.classCounts[idx]; i++) {
@@ -612,7 +629,7 @@ const App = () => {
       }
     });
     return rows;
-  }, [config.classCounts, config.classSizes, config.classCustomSizes]);
+  }, [enrolMode, moodleGroups, config.classCounts, config.classSizes, config.classCustomSizes]);
 
   const rawEndDate = useMemo(() => {
     const d = new Date(config.enrolDate);
@@ -624,6 +641,19 @@ const App = () => {
   const endDateFormatted = rawEndDate.toLocaleDateString('de-DE');
 
   const totalStudents = useMemo(() => classRows.reduce((s, r) => s + r.size, 0), [classRows]);
+
+  // Wenn classRows sich ändert (Klassenanzahl geändert), alle Klassen im Update-Modus selektieren
+  useEffect(() => {
+    setSelectedUpdateClassIds(new Set(classRows.map(r => r.id)));
+  }, [classRows]);
+
+  // Wenn Modus wechselt oder Institut sich ändert, geladene Gruppen zurücksetzen
+  useEffect(() => {
+    if (enrolMode !== 'update') { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); }
+  }, [enrolMode]);
+  useEffect(() => {
+    setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({});
+  }, [config.institute]);
 
   const unusualWarnings = useMemo(() => {
     const w = [];
@@ -644,11 +674,16 @@ const App = () => {
   }, [config.enrolDate, config.enrolPeriod]);
 
   const getClassLabel = useCallback(row => {
+    if (row.groupName) {
+      // Moodle-Gruppe: Suffix nach "{institute}-" zurückgeben
+      const prefix = config.institute?.trim() + '-';
+      return row.groupName.startsWith(prefix) ? row.groupName.slice(prefix.length) : row.groupName;
+    }
     const n = config.classNames?.[row.id - 1]?.trim();
     if (n) return n;
     const effectiveId = row.id + classGroupOffsetRef.current;
     return `Klasse-${String(effectiveId).padStart(2, '0')}`;
-  }, [config.classNames]);
+  }, [config.classNames, config.institute]);
 
   // ─── Handler ──────────────────────────────────────────────────────────────
   const handleInput = useCallback(e => {
@@ -677,7 +712,14 @@ const App = () => {
     setConfig(p => ({ ...p, enrolPeriod: Math.max(1, diff) }));
   }, [config.enrolDate]);
   const updateClassSize = useCallback((idx, val) => setConfig(p => { const s = [...p.classSizes]; s[idx] = Math.max(0, parseInt(val, 10) || 0); return { ...p, classSizes: s }; }), []);
-  const updateClassCount = useCallback((idx, val) => setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) }, classCustomSizes: {} })), []);
+  const updateClassCount = useCallback((idx, val) => {
+    // classMatrix, classNames und classCustomSizes alle leeren:
+    // Die Klassen-IDs sind sequenziell und verschieben sich wenn classCounts sich ändert.
+    // Stale Zuweisungen wären schlimmer als ein Neustart.
+    setConfig(p => ({ ...p, classCounts: { ...p.classCounts, [idx]: Math.max(0, parseInt(val, 10) || 0) }, classCustomSizes: {}, classNames: {} }));
+    setClassMatrix({});
+    setInvalidClassIds(new Set());
+  }, []);
   const updateClassName = useCallback((rowIndex, val) => setConfig(p => ({ ...p, classNames: { ...p.classNames, [rowIndex]: val } })), []);
   const updateCustomClassSize = useCallback((rowId, val) => {
     const num = Math.max(0, parseInt(val, 10) || 0);
@@ -685,10 +727,9 @@ const App = () => {
   }, []);
   const toggleCourseAssignment = useCallback((classId, courseId) => {
     const sid = String(courseId);
+    if (lockedClassCourseMap[classId]?.has(sid)) return; // gesperrter Kurs (bereits eingeschrieben)
     setClassMatrix(prev => { const cur = (prev[classId] || []).map(String); return { ...prev, [classId]: cur.includes(sid) ? cur.filter(x => x !== sid) : [...cur, sid] }; });
-    // Validierung wird nur beim Generieren neu gesetzt — hier nur entfernen wenn jetzt mind. 1 aktiver Kurs
-    // (wird im useEffect unten reaktiv nachgeführt)
-  }, []);
+  }, [lockedClassCourseMap]);
 
   // Validierung reaktiv nachführen: wenn invalidClassIds gesetzt sind, live aktualisieren
   useEffect(() => {
@@ -764,14 +805,59 @@ const App = () => {
     if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
     setShowGenerateConfirm(false);
     const activeIds = activeMatrixCourses.map(c => String(c.id));
+    const effectiveClassRows = enrolMode === 'update' && moodleGroups.length > 0
+      ? classRows.filter(r => r.moodleGroupId && selectedMoodleGroupIds.has(r.moodleGroupId))
+      : enrolMode === 'update' && selectedUpdateClassIds.size < classRows.length
+        ? classRows.filter(r => selectedUpdateClassIds.has(r.id))
+        : classRows;
     const badIds = new Set();
-    classRows.forEach(r => {
+    effectiveClassRows.forEach(r => {
       if (r.size === 0) return; // Klassen ohne Schüler brauchen keine Kurszuweisung
       const assigned = (classMatrix[r.id] || []).map(String);
       if (!assigned.some(id => activeIds.includes(id))) badIds.add(r.id);
     });
     if (badIds.size) { setInvalidClassIds(badIds); return addToast(`${badIds.size} Klasse(n) ohne Kurszuweisung — rot markiert.`, 'error'); }
     setInvalidClassIds(new Set());
+
+    // ── Aktualisieren-Modus mit geladenen Moodle-Gruppen ─────────────────────
+    if (enrolMode === 'update' && moodleGroups.length > 0) {
+      const instClean = config.institute.replace(/\s+/g, '').toLowerCase();
+      const usernameSet = new Set();
+      const data = [];
+      // Alle bekannten Kurse (Pool + allMoodleCourses) für ID-Lookup
+      const allKnownCourseMap = new Map([...courseDictionary, ...(allMoodleCourses.length > 0 ? allMoodleCourses : [])].map(c => [String(c.id), c]));
+      for (const r of effectiveClassRows) {
+        const matrixIds = new Set((classMatrix[r.id] || []).map(String));
+        // Bestehende Kurse (aus Moodle) + manuell neu zugewiesene kombinieren
+        const allCourseIds = new Set([...(r.existingCourseIds || []).map(String), ...matrixIds]);
+        const selCourses = [...allCourseIds].map(id => allKnownCourseMap.get(id)).filter(Boolean);
+        const classLabel = r.groupName;
+        try {
+          const members = await fetchGroupMembers(config.moodleUrl, config.moodleToken, r.courseId, r.moodleGroupId);
+          for (const member of members) {
+            if (!member.username || usernameSet.has(member.username)) continue;
+            usernameSet.add(member.username);
+            const isTrainer = member.username.includes(`${instClean}-trainer-`);
+            data.push({
+              cNum: isTrainer ? 'ALL' : String(r.id).padStart(2, '0'),
+              cLabel: isTrainer ? undefined : classLabel,
+              isT: isTrainer,
+              first: member.firstname || (isTrainer ? 'Trainer' : 'Schüler'),
+              last: member.lastname || config.institute,
+              user: member.username,
+              mail: member.email || `${member.username}@${instClean}.com`,
+              pw: isTrainer ? (config.autoPassword ? generatePassword() : config.trainerPwd) : (config.autoPassword ? generatePassword() : config.studentPwd),
+              courses: isTrainer ? activeMatrixCourses : selCourses,
+            });
+          }
+        } catch (e) {
+          addToast(`Fehler beim Laden von ${r.groupName}: ${e.message}`, 'error');
+        }
+      }
+      setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
+      addToast(`${data.length} Accounts aus Moodle geladen.`, 'success');
+      return;
+    }
 
     // ── Neu-Anlegen-Modus: höchste bestehende Nummern abfragen ───────────────
     let studentOffset = 0;
@@ -790,12 +876,23 @@ const App = () => {
             if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) return parseInt(m[1], 10); }
             return null;
           }).filter(Boolean);
-          const { maxStudent, maxTrainer, maxClass } = await findMaxNumbers(config.moodleUrl, config.moodleToken, instClean, activeCourseIds);
+          // Kursübergreifende Klassen-Nummerierung: alle bekannten Kurse durchsuchen
+          const { maxStudent, maxTrainer, orphanUsernames } = await findMaxNumbers(config.moodleUrl, config.moodleToken, instClean, activeCourseIds);
           studentOffset = maxStudent;
           trainerOffset = maxTrainer;
-          classOffset = maxClass;
-          if (maxStudent > 0 || maxTrainer > 0 || maxClass > 0)
-            addToast(`Neu-Anlegen: Starte bei Schüler ${maxStudent + 1}, Trainer ${maxTrainer + 1}, Klasse ${maxClass + 1}.`, 'success', 5000);
+          // Klassen-Offset aus höchstem Student ableiten: ceil(maxStudent / Ø-Klassengröße)
+          // Setzt voraus, dass frühere Sessions dieselbe Klassengröße verwendet haben.
+          if (maxStudent > 0 && classRows.length > 0) {
+            const avgSize = Math.round(classRows.reduce((s, r) => s + r.size, 0) / classRows.length);
+            classOffset = avgSize > 0 ? Math.ceil(maxStudent / avgSize) : 0;
+          }
+          if (maxStudent > 0 || maxTrainer > 0 || classOffset > 0)
+            addToast(`Neu-Anlegen: Starte bei Schüler ${maxStudent + 1}, Trainer ${maxTrainer + 1}, Klasse ${classOffset + 1}.`, 'success', 5000);
+          if (orphanUsernames.length > 0) {
+            const preview = orphanUsernames.slice(0, 3).join(', ');
+            const more = orphanUsernames.length > 3 ? ` (+${orphanUsernames.length - 3} weitere)` : '';
+            addToast(`⚠ ${orphanUsernames.length} Account(s) ohne Kurseinschreibung in Moodle gefunden: ${preview}${more}. Diese wurden bei der Nummerierung berücksichtigt — bitte in Moodle prüfen und ggf. löschen.`, 'warning', 12000);
+          }
         } catch (e) {
           addToast(`Moodle-Abfrage fehlgeschlagen: ${e.message} — starte bei 1.`, 'error');
         } finally {
@@ -812,18 +909,18 @@ const App = () => {
       data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${tNum}`, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
     }
     let sIdx = studentOffset + 1;
-    classRows.forEach(r => {
+    effectiveClassRows.forEach(r => {
       const selIds = (classMatrix[r.id] || []).map(String);
       const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
       const classLabel = `${config.institute}-${getClassLabel(r)}`;
       for (let i = 0; i < r.size; i++) {
         const id = String(sIdx++).padStart(3, '0');
-        data.push({ cNum: String(r.id).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
+        data.push({ cNum: String(r.id + classGroupOffsetRef.current).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
       }
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
     addToast(`${data.length} Accounts generiert.`, 'success');
-  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, getClassLabel, addToast, unusualWarnings, enrolMode]);
+  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, allMoodleCourses, getClassLabel, addToast, unusualWarnings, enrolMode, selectedUpdateClassIds, moodleGroups, selectedMoodleGroupIds]); // eslint-disable-line
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
   const buildCsvBlob = useCallback(() => {
@@ -855,12 +952,13 @@ const App = () => {
   }, [buildCsvBlob, config.institute, addToast, addExportEntry]);
 
   // ─── Excel ────────────────────────────────────────────────────────────────
-  const buildExcelBlob = useCallback(() => {
-    if (!generatedData.length) return null;
+  const buildExcelBlob = useCallback((dataOverride = null) => {
+    const data = dataOverride ?? generatedData;
+    if (!data.length) return null;
     const wb = XLSX.utils.book_new();
     const periodStr = `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`;
-    const trainers = generatedData.filter(d => d.isT);
-    const classIds = [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort();
+    const trainers = data.filter(d => d.isT);
+    const classIds = [...new Set(data.filter(d => !d.isT).map(d => d.cNum))].sort();
     // Hyperlink zu einer bereits befüllten Zelle hinzufügen
     const addLink = (ws, r, c, url) => {
       if (!url) return;
@@ -875,7 +973,7 @@ const App = () => {
       ['Institut:', config.institute],
       ['Datum:', new Date().toLocaleDateString('de-DE')],
       ['Freischaltzeitraum:', periodStr],
-      ['Gesamt-Accounts:', generatedData.length],
+      ['Gesamt-Accounts:', data.length],
       ['Zugang:', loginUrl],
       [],
       ['Gruppe', 'Typ', 'Anzahl Accounts', 'Kurse'],
@@ -884,8 +982,8 @@ const App = () => {
       overviewRows.push(['Trainer', 'Trainer', trainers.length, activeMatrixCourses.map(c => c.label).join(', ')]);
     }
     classIds.forEach(id => {
-      const students = generatedData.filter(d => d.cNum === id);
-      const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
+      const students = data.filter(d => d.cNum === id);
+      const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
       const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
       overviewRows.push([classLabel, 'Schüler', students.length, students[0]?.courses.map(c => c.label).join(', ') || '']);
     });
@@ -894,13 +992,30 @@ const App = () => {
     wsOverview['!cols'] = [{ wch: 25 }, { wch: 30 }, { wch: 16 }, { wch: 50 }];
     XLSX.utils.book_append_sheet(wb, wsOverview, 'Übersicht');
 
+    // Hilfsfunktion: Union aller Kurse einer Gruppe (nach ID, Reihenfolge erhalten)
+    const getUniqueCoursesXlsx = (accounts) => {
+      const seen = new Set();
+      const result = [];
+      accounts.forEach(a => a.courses.forEach(c => {
+        if (!seen.has(String(c.id))) { seen.add(String(c.id)); result.push(c); }
+      }));
+      return result;
+    };
+
     // Hilfsfunktion: Sheet aus Accounts bauen (Trainer + Klassen gleich strukturiert)
+    // courses = Spalten-Definition; Kurs-Zuordnung per ID (nicht per Position)
     const buildAccountSheet = (accounts, courses) => {
       const header = ['Name', 'Username', 'Passwort', ...courses.map((_, i) => `Kurs ${i + 1}`)];
-      const dataRows = accounts.map(a => ['', a.user, a.pw, ...a.courses.map(c => c.label)]);
+      const dataRows = accounts.map(a => [
+        '', a.user, a.pw,
+        ...courses.map(cc => a.courses.find(c => String(c.id) === String(cc.id))?.label || ''),
+      ]);
       const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
       accounts.forEach((a, ri) => {
-        a.courses.forEach((c, ci) => { if (c.url) addLink(ws, ri + 1, 3 + ci, c.url); });
+        courses.forEach((cc, ci) => {
+          const c = a.courses.find(c => String(c.id) === String(cc.id));
+          if (c?.url) addLink(ws, ri + 1, 3 + ci, c.url);
+        });
       });
       ws['!cols'] = [{ wch: 20 }, { wch: 32 }, { wch: 16 }, ...courses.map(() => ({ wch: 22 }))];
       return ws;
@@ -908,16 +1023,16 @@ const App = () => {
 
     // ─── Sheet: Trainer ───
     if (trainers.length) {
-      const wsT = buildAccountSheet(trainers, activeMatrixCourses);
+      const wsT = buildAccountSheet(trainers, getUniqueCoursesXlsx(trainers));
       XLSX.utils.book_append_sheet(wb, wsT, 'Trainer');
     }
 
     // ─── Sheet per class ───
     classIds.forEach(id => {
-      const students = generatedData.filter(d => d.cNum === id);
-      const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
+      const students = data.filter(d => d.cNum === id);
+      const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
       const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
-      const courses = students[0]?.courses || [];
+      const courses = getUniqueCoursesXlsx(students);
       const ws = buildAccountSheet(students, courses);
       const sheetName = classLabel.replace(/[\\\/\?\*\[\]:]/g, '').substring(0, 31);
       XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -927,8 +1042,8 @@ const App = () => {
     return new Blob([new Uint8Array(buffer)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted]);
 
-  const downloadExcel = useCallback(async ({ returnBlob = false } = {}) => {
-    const blob = buildExcelBlob();
+  const downloadExcel = useCallback(async ({ returnBlob = false, dataOverride = null } = {}) => {
+    const blob = buildExcelBlob(dataOverride);
     if (!blob) return returnBlob ? null : undefined;
     if (returnBlob) return blob;
 
@@ -962,8 +1077,9 @@ const App = () => {
   }, [buildExcelBlob, config.institute, addToast, addExportEntry]);
 
   // ─── PDF ──────────────────────────────────────────────────────────────────
-  const downloadPDF = useCallback(async ({ returnBlob = false } = {}) => {
+  const downloadPDF = useCallback(async ({ returnBlob = false, dataOverride = null } = {}) => {
     if (!returnBlob) setIsExportingPDF(true);
+    const data = dataOverride ?? generatedData;
     try {
       const qrDataUrl = await getQrDataUrl().catch(() => null);
       const doc = new jsPDF('l', 'mm', 'a4');
@@ -1107,29 +1223,44 @@ const App = () => {
         },
       });
 
-      const trainers = generatedData.filter(d => d.isT);
+      // Hilfsfunktion: alle einzigartigen Kurse einer Account-Gruppe (nach ID, Reihenfolge bleibt erhalten)
+      const getUniqueCourses = (accounts) => {
+        const seen = new Set();
+        const result = [];
+        accounts.forEach(a => a.courses.forEach(c => {
+          if (!seen.has(String(c.id))) { seen.add(String(c.id)); result.push(c); }
+        }));
+        return result;
+      };
+      // Kurs-Label für eine bestimmte Spalte (oder leer wenn User nicht eingeschrieben)
+      const courseRow = (account, colCourses) =>
+        colCourses.map(cc => account.courses.find(c => String(c.id) === String(cc.id))?.label || '');
+
+      const trainers = data.filter(d => d.isT);
       if (trainers.length) {
+        const trainerCourses = getUniqueCourses(trainers);
         if (!firstDataPage) doc.addPage(); else firstDataPage = false;
         renderHeader('Zugangsdaten: Trainer', `ANZAHL: ${trainers.length}`);
         autoTable(doc, {
-          head: [['Name (fakultativ)', 'Username', 'Passwort', ...activeMatrixCourses.map((_, i) => `Kurs ${i + 1}`)]],
-          body: trainers.map(t => ['', t.user, t.pw, ...t.courses.map(c => c.label)]),
-          ...tOpts(activeMatrixCourses, `Trainer — ${config.institute}`),
+          head: [['Name (fakultativ)', 'Username', 'Passwort', ...trainerCourses.map((_, i) => `Kurs ${i + 1}`)]],
+          body: trainers.map(t => ['', t.user, t.pw, ...courseRow(t, trainerCourses)]),
+          ...tOpts(trainerCourses, `Trainer — ${config.institute}`),
           didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; }
         });
       }
 
-      [...new Set(generatedData.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id) => {
+      [...new Set(data.filter(d => !d.isT).map(d => d.cNum))].sort().forEach((id) => {
         if (!firstDataPage) doc.addPage(); else firstDataPage = false;
-        const students = generatedData.filter(d => d.cNum === id);
-        const row = classRows.find(r => String(r.id).padStart(2, '0') === id);
+        const students = data.filter(d => d.cNum === id);
+        const classCourses = getUniqueCourses(students);
+        const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
         renderHeader(classLabel, `ANZAHL: ${students.length}`);
-        
-        autoTable(doc, { 
-          head: [['Name (faktualtiv)', 'Username', 'Passwort', ...students[0].courses.map((_, i) => `Kurs ${i + 1}`)]], 
-          body: students.map(s => ['', s.user, s.pw, ...s.courses.map(c => c.label)]), 
-          ...tOpts(students[0].courses, `${classLabel} — ${config.institute}`) 
+
+        autoTable(doc, {
+          head: [['Name (fakultativ)', 'Username', 'Passwort', ...classCourses.map((_, i) => `Kurs ${i + 1}`)]],
+          body: students.map(s => ['', s.user, s.pw, ...courseRow(s, classCourses)]),
+          ...tOpts(classCourses, `${classLabel} — ${config.institute}`)
         });
       });
 
@@ -1186,6 +1317,55 @@ const App = () => {
     }
   }, [config.institute, buildCsvBlob, downloadPDF, downloadExcel, addToast]);
 
+  // ─── Moodle: Klassen aus Moodle laden (Aktualisieren-Modus) ──────────────
+  const loadMoodleGroups = useCallback(async () => {
+    if (!config.moodleUrl?.trim() || !config.moodleToken?.trim()) return addToast('Moodle-URL und Token fehlen (Einstellungen → Backend).', 'error');
+    if (!config.institute?.trim()) return addToast('Bitte zuerst Institutsnamen eingeben.', 'error');
+    setIsLoadingMoodleGroups(true);
+    try {
+      // Alle Moodle-Kurs-IDs bestimmen (allMoodleCourses wenn vorhanden, sonst frisch laden)
+      let searchCourses = allMoodleCourses.length > 0 ? allMoodleCourses : courseDictionary;
+      if (searchCourses.length === 0) {
+        try {
+          searchCourses = await fetchMoodleCourses(config.moodleUrl, config.moodleToken);
+        } catch { searchCourses = []; }
+      }
+      const allCourseIds = searchCourses.map(c => {
+        const numId = parseInt(String(c?.id ?? ''), 10);
+        return (!isNaN(numId) && numId > 0) ? numId : null;
+      }).filter(Boolean);
+
+      if (allCourseIds.length === 0) return addToast('Keine Kurse verfügbar — bitte Kurskatalog laden oder Kurs-Pool befüllen.', 'error');
+
+      const groups = await fetchInstituteGroups(config.moodleUrl, config.moodleToken, config.institute, allCourseIds);
+      if (groups.length === 0) {
+        addToast(`Keine Klassen für "${config.institute}" in Moodle gefunden.`, 'warning', 6000);
+        return;
+      }
+
+      // Matrix mit bestehenden Pool-Kursen vorfüllen + Locked-Map aufbauen
+      const poolIdSet = new Set(courseDictionary.map(c => String(c.id)));
+      const newMatrix = {};
+      const newLocked = {};
+      groups.forEach((g, i) => {
+        const rowId = i + 1;
+        const existingPoolIds = (g.existingCourseIds || []).map(String).filter(id => poolIdSet.has(id));
+        newMatrix[rowId] = existingPoolIds;
+        newLocked[rowId] = new Set(existingPoolIds);
+      });
+
+      setMoodleGroups(groups);
+      setSelectedMoodleGroupIds(new Set(groups.map(g => g.id)));
+      setClassMatrix(newMatrix);
+      setLockedClassCourseMap(newLocked);
+      addToast(`${groups.length} Klasse(n) aus Moodle geladen.`, 'success');
+    } catch (e) {
+      addToast(`Fehler beim Laden: ${e.message}`, 'error');
+    } finally {
+      setIsLoadingMoodleGroups(false);
+    }
+  }, [config.moodleUrl, config.moodleToken, config.institute, allMoodleCourses, courseDictionary, addToast]);
+
   // ─── Moodle Einschreibung ──────────────────────────────────────────────────
   const handleMoodleEnrol = useCallback(async () => {
     const progress = (label, pct) => setMoodleProgress({ label, pct, done: false, error: false });
@@ -1215,12 +1395,39 @@ const App = () => {
 
     result.warnings.forEach(w => addToast(w, 'info'));
     addExportEntry('Moodle', 'Moodle-Einschreibung');
+
+    // ── Schritt 6: Nur tatsächlich eingeschriebene User behalten ──────────
+    // Basis-Filter: nur User die in Moodle erstellt/gefunden wurden (in userIdMap).
+    // User die weder angelegt noch gefunden werden konnten stehen nicht im PDF.
+    const enrolledUsernames = new Set(Object.keys(result.userIdMap));
+    const moodleData = generatedData.filter(u => enrolledUsernames.has(u.user?.trim().toLowerCase()));
+
+    // ── Schritt 7: Vollständige Kurseinschreibungen laden ─────────────────
+    // Mit Anreicherung: User mit 0 echten Moodle-Kursen werden gefiltert.
+    // Ohne Anreicherung (Berechtigung fehlt): moodleData als Fallback.
+    let exportData = moodleData;
+    try {
+      progress('Kurseinschreibungen aus Moodle laden…', 86);
+      const enriched = await fetchFullEnrollments(
+        config.moodleUrl, config.moodleToken,
+        moodleData, result.userIdMap, courseDictionary
+      );
+      // User mit 0 echten Moodle-Kursen rausfiltern — Einschreibung fehlgeschlagen
+      exportData = enriched.filter(u => u.courses?.length > 0);
+      setGeneratedData(exportData);
+    } catch (e) {
+      console.warn('[Moodle] Kursanreicherung fehlgeschlagen:', e.message);
+      addToast('Kursanreicherung fehlgeschlagen — PDF zeigt nur erfolgreich angelegte Accounts.', 'warning', 6000);
+      setGeneratedData(moodleData);
+    }
+
     let sharepointDone = false;
     let zohoDone = false;
+    const postErrors = []; // Fehler nach Moodle — alle Steps laufen durch
 
-    // ── Schritt 6: SharePoint ─────────────────────────────────────────────
+    // ── Schritt 7: SharePoint ─────────────────────────────────────────────
     if (config.sharepointUrl) {
-      progress('SharePoint hochladen…', 88);
+      progress('SharePoint hochladen…', 90);
       const now = new Date();
       const dateStr = now.toISOString().split('T')[0];
       const instClean = config.institute.replace(/\s+/g, '_');
@@ -1252,7 +1459,7 @@ const App = () => {
         '',
         ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
         'Accounts', '--------',
-        ...generatedData.map(u =>
+        ...exportData.map(u =>
           `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
         ),
       ];
@@ -1261,8 +1468,8 @@ const App = () => {
       const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
       const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
       try {
-        const pdfBlob = await downloadPDF({ returnBlob: true });
-        const xlsxBlob = await downloadExcel({ returnBlob: true });
+        const pdfBlob = await downloadPDF({ returnBlob: true, dataOverride: exportData });
+        const xlsxBlob = await downloadExcel({ returnBlob: true, dataOverride: exportData });
         if (pdfBlob && xlsxBlob) {
           const ok = await uploadMoodleResultToSharePoint(
             txtBlob, pdfBlob, xlsxBlob,
@@ -1274,17 +1481,15 @@ const App = () => {
         }
       } catch (spErr) {
         console.error('[SharePoint] Fehler:', spErr);
-        setMoodleProgress({ label: `SharePoint-Fehler: ${spErr.message}`, pct: 88, done: false, error: true });
-        setIsMoodleEnrolling(false);
-        return; // Abbruch — kein Zoho
+        postErrors.push(`SharePoint: ${spErr.message}`);
       }
     }
 
-    // ── Schritt 7: Zoho CRM ───────────────────────────────────────────────
+    // ── Schritt 8: Zoho CRM — unabhängig von SharePoint ──────────────────
     if (zohoEnabled) {
-      progress('Zoho CRM aktualisieren…', 95);
+      progress('Zoho CRM aktualisieren…', 96);
       try {
-        const { account, created } = await findOrCreateZohoAccount(config, config.institute);
+        const { account } = await findOrCreateZohoAccount(config, config.institute);
         const today = new Date().toISOString().split('T')[0];
         const enrolStart = new Date(config.enrolDate).toLocaleDateString('de-DE');
         const dealName = `Moodle Einschreibung – ${enrolStart} – ${endDateFormatted}`;
@@ -1305,11 +1510,12 @@ const App = () => {
         zohoDone = true;
       } catch (e) {
         console.error('[Zoho] CRM-Fehler:', e);
-        setMoodleProgress({ label: `CRM-Fehler: ${e?.message || String(e)}`, pct: 95, done: false, error: true });
-        setIsMoodleEnrolling(false);
-        return;
+        postErrors.push(`CRM: ${e?.message || String(e)}`);
       }
     }
+
+    // Fehler aus SP/CRM als Warnings anzeigen — Moodle war OK
+    postErrors.forEach(msg => addToast(msg, 'warning', 8000));
 
     // ── Fertig ────────────────────────────────────────────────────────────
     const existing = result.usersResolved - result.usersCreated;
@@ -1557,6 +1763,8 @@ const App = () => {
                     'core_cohort_create_cohorts',
                     'core_cohort_search_cohorts',
                     'core_cohort_add_cohort_members',
+                    'core_enrol_get_enrolled_users',
+                    'core_enrol_get_users_courses',
                   ].map(fn => (
                     <div key={fn} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="px-3 py-1.5 rounded-lg border font-mono text-[10px]" >
                       <span style={{ color: C.accent1 }}>{fn}</span>
@@ -2768,23 +2976,81 @@ const App = () => {
 
               {/* Klassen */}
               <div style={{ backgroundColor: C.card, borderColor: C.border }} className="md:col-span-3 p-4 lg:p-5 rounded-2xl border shadow-sm">
-                <h3 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-3"><GraduationCap size={12} /> Klassen Struktur</h3>
-                <div className="space-y-2">
-                  {config.classSizes.map((size, idx) => (
-                    <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex justify-between items-center px-3 py-1.5 rounded-lg border focus-within:border-blue-300 transition-colors">
-                      <span style={{ color: C.muted }} className="text-[11px] font-medium">{size} Plätze</span>
-                      <div className="flex items-center gap-1.5">
-                        <span style={{ color: C.muted }} className="text-[9px]">Anz:</span>
-                        <input type="number" min="0" value={config.classCounts[idx]} onChange={e => updateClassCount(idx, e.target.value)} style={{ color: C.main }} className="w-8 bg-transparent text-right text-sm font-semibold outline-none" />
-                      </div>
+                {enrolMode === 'update' ? (
+                  <>
+                    <h3 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-3"><GraduationCap size={12} /> Klassen aus Moodle</h3>
+                    {moodleGroups.length === 0 ? (
+                      <>
+                        <p style={{ color: C.muted }} className="text-[10px] mb-3 leading-snug">Klassen für das gewählte Institut aus Moodle laden.</p>
+                        <button
+                          onClick={loadMoodleGroups}
+                          disabled={isLoadingMoodleGroups || !config.moodleUrl?.trim() || !config.moodleToken?.trim() || !config.institute?.trim()}
+                          style={{ backgroundColor: C.accent1 }}
+                          className="w-full py-2 text-white rounded-xl text-[10px] font-bold uppercase hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+                        >
+                          {isLoadingMoodleGroups ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                          {isLoadingMoodleGroups ? 'Laden…' : 'Klassen laden'}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between mb-2">
+                          <span style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">{moodleGroups.length} Klasse(n)</span>
+                          <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1">
+                            <X size={10} /> Zurücksetzen
+                          </button>
+                        </div>
+                        <div className="space-y-1 max-h-40 overflow-y-auto custom-scrollbar">
+                          {moodleGroups.map(g => {
+                            const sel = selectedMoodleGroupIds.has(g.id);
+                            return (
+                              <button
+                                key={g.id}
+                                onClick={() => setSelectedMoodleGroupIds(prev => { const n = new Set(prev); if (n.has(g.id)) n.delete(g.id); else n.add(g.id); return n; })}
+                                style={{ backgroundColor: sel ? C.accent1 + '15' : C.subtle, borderColor: sel ? C.accent1 : C.border, color: sel ? C.accent1 : C.muted }}
+                                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-[10px] font-medium transition-all text-left"
+                              >
+                                <span className="flex items-center gap-1.5">
+                                  {sel ? <CheckSquare size={11} /> : <Square size={11} />}
+                                  {g.name.replace(config.institute?.trim() + '-', '')}
+                                </span>
+                                <span style={{ color: C.muted }} className="text-[9px] shrink-0 ml-1">{g.memberCount} Mitgl.</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <button
+                          onClick={loadMoodleGroups}
+                          disabled={isLoadingMoodleGroups}
+                          style={{ color: C.muted, borderColor: C.border }}
+                          className="w-full mt-2 py-1.5 border rounded-xl text-[9px] font-bold uppercase hover:opacity-70 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                        >
+                          <RefreshCw size={10} /> Neu laden
+                        </button>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <h3 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-[0.2em] flex items-center gap-1.5 mb-3"><GraduationCap size={12} /> Klassen Struktur</h3>
+                    <div className="space-y-2">
+                      {config.classSizes.map((size, idx) => (
+                        <div key={idx} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="flex justify-between items-center px-3 py-1.5 rounded-lg border focus-within:border-blue-300 transition-colors">
+                          <span style={{ color: C.muted }} className="text-[11px] font-medium">{size} Plätze</span>
+                          <div className="flex items-center gap-1.5">
+                            <span style={{ color: C.muted }} className="text-[9px]">Anz:</span>
+                            <input type="number" min="0" value={config.classCounts[idx]} onChange={e => updateClassCount(idx, e.target.value)} style={{ color: C.main }} className="w-8 bg-transparent text-right text-sm font-semibold outline-none" />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-                {totalStudents > 1000 && (
-                  <div style={{ backgroundColor: darkMode ? '#451a0320' : '#FEF3C7', borderColor: darkMode ? '#D97706' : '#FCD34D', color: darkMode ? '#FCD34D' : '#92400E' }} className="mt-2.5 flex items-start gap-2 border rounded-lg px-2.5 py-2 text-[10px] font-medium leading-snug">
-                    <AlertTriangle size={13} className="shrink-0 mt-px" style={{ color: '#D97706' }} />
-                    <span>CSV-Import von <strong>{totalStudents}</strong> Usern kann Moodle-Timeouts verursachen. In kleineren Chargen exportieren.</span>
-                  </div>
+                    {totalStudents > 1000 && (
+                      <div style={{ backgroundColor: darkMode ? '#451a0320' : '#FEF3C7', borderColor: darkMode ? '#D97706' : '#FCD34D', color: darkMode ? '#FCD34D' : '#92400E' }} className="mt-2.5 flex items-start gap-2 border rounded-lg px-2.5 py-2 text-[10px] font-medium leading-snug">
+                        <AlertTriangle size={13} className="shrink-0 mt-px" style={{ color: '#D97706' }} />
+                        <span>CSV-Import von <strong>{totalStudents}</strong> Usern kann Moodle-Timeouts verursachen. In kleineren Chargen exportieren.</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -2969,9 +3235,10 @@ const App = () => {
                     <tr><td colSpan={config.courseSlotCount + 1} style={{ color: C.muted }} className="py-10 text-center italic font-medium">Bitte oben Klassen definieren.</td></tr>
                   ) : classRows.map(c => {
                     const isInvalid = invalidClassIds.has(c.id);
+                    const isDeselected = enrolMode === 'update' && !selectedUpdateClassIds.has(c.id);
                     const customName = config.classNames?.[c.id - 1]?.trim();
                     return (
-                      <tr key={c.id} style={{ backgroundColor: isInvalid ? '#FFF1F2' : undefined }} className={`transition-colors group ${!isInvalid ? 'hover:bg-blue-50/10' : ''}`}>
+                      <tr key={c.id} style={{ backgroundColor: isInvalid ? '#FFF1F2' : undefined, opacity: isDeselected ? 0.4 : 1 }} className={`transition-all group ${!isInvalid ? 'hover:bg-blue-50/10' : ''}`}>
                         <td style={{ borderColor: isInvalid ? '#FECDD3' : C.border, backgroundColor: isInvalid ? '#FFE4E6' : C.subtle }} className="px-3 py-3 text-center border-r">
                           <div className="flex flex-col gap-0.5 items-center">
                             {isInvalid && <AlertTriangle size={11} className="text-rose-500 mb-0.5" />}
@@ -2992,15 +3259,15 @@ const App = () => {
                             ) : (
                               <div className="flex items-center gap-0.5">
                                 <span style={{ color: isInvalid ? '#BE123C' : C.muted, backgroundColor: isInvalid ? '#FEE2E2' : C.card, borderColor: isInvalid ? '#FECDD3' : C.border }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.size} Pl.</span>
-                                <button
+                                {!(enrolMode === 'update' && moodleGroups.length > 0) && <button
                                   onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.size)); }}
                                   title="Schülerzahl bearbeiten"
                                   style={{ color: config.classCustomSizes?.[c.id] != null ? '#3b82f6' : C.muted }}
                                   className="p-0.5 hover:opacity-70 transition-opacity"
                                 >
                                   <Edit3 size={9} />
-                                </button>
-                                {config.classCustomSizes?.[c.id] != null && (
+                                </button>}
+                                {!(enrolMode === 'update' && moodleGroups.length > 0) && config.classCustomSizes?.[c.id] != null && (
                                   <button
                                     onClick={() => setConfig(p => { const s = { ...p.classCustomSizes }; delete s[c.id]; return { ...p, classCustomSizes: s }; })}
                                     title="Custom-Größe zurücksetzen"
@@ -3018,13 +3285,14 @@ const App = () => {
                           const cid = config.selectedPoolCourseIds[i];
                           const isActive = cid !== 'none';
                           const isSel = isActive && (classMatrix[c.id] || []).map(String).includes(String(cid));
+                          const isLocked = isActive && isSel && lockedClassCourseMap[c.id]?.has(String(cid));
                           return (
                             <td key={i} className="px-4 py-2.5 text-center">
                               {isActive ? (
-                                <button onClick={() => toggleCourseAssignment(c.id, cid)} title={isSel ? 'Zuweisung entfernen' : 'Kurs zuweisen'}
-                                  style={{ backgroundColor: isSel ? C.accent2 : C.card, color: isSel ? 'white' : C.muted, borderColor: isSel ? C.accent2 : isInvalid ? '#FECDD3' : C.border }}
-                                  className={`w-10 h-10 rounded-xl border-[1.5px] transition-all duration-200 flex items-center justify-center mx-auto shadow-sm ${isSel ? 'scale-105 shadow-md' : 'hover:scale-105'}`}>
-                                  {isSel ? <Check size={20} strokeWidth={2.5} /> : <Plus size={18} strokeWidth={2} />}
+                                <button onClick={() => toggleCourseAssignment(c.id, cid)} title={isLocked ? 'Bereits eingeschrieben (wird aktualisiert)' : isSel ? 'Zuweisung entfernen' : 'Kurs zuweisen'}
+                                  style={{ backgroundColor: isLocked ? C.accent1 : isSel ? C.accent2 : C.card, color: (isSel || isLocked) ? 'white' : C.muted, borderColor: isLocked ? C.accent1 : isSel ? C.accent2 : isInvalid ? '#FECDD3' : C.border, cursor: isLocked ? 'default' : 'pointer' }}
+                                  className={`w-10 h-10 rounded-xl border-[1.5px] transition-all duration-200 flex items-center justify-center mx-auto shadow-sm ${!isLocked && !isSel ? 'hover:scale-105' : 'scale-105 shadow-md'}`}>
+                                  {isLocked ? <RefreshCw size={14} strokeWidth={2.5} /> : isSel ? <Check size={20} strokeWidth={2.5} /> : <Plus size={18} strokeWidth={2} />}
                                 </button>
                               ) : (
                                 <div style={{ borderColor: C.border, backgroundColor: C.subtle }} className="w-10 h-10 rounded-xl border border-dashed mx-auto flex items-center justify-center">
