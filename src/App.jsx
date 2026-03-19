@@ -3050,15 +3050,6 @@ const App = () => {
 
           {/* Actions */}
           <section style={{ backgroundColor: C.card, borderColor: C.border }} className="p-4 rounded-3xl border shadow-sm shrink-0">
-              <button onClick={() => setActiveModal('coursePreview')} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2">
-              <Eye size={16} /> Kursübersicht
-            </button>
-            {zohoEnabled && (
-              <button onClick={() => { setInstituteSearch(''); setActiveModal('institutePreview'); }} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full py-2.5 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2 mt-2">
-                <Building2 size={16} /> Institutübersicht
-                {zohoAllAccounts.length > 0 && <span style={{ backgroundColor: C.main + '22', color: C.main }} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold">{zohoAllAccounts.length}</span>}
-              </button>
-            )}
 
             {showGenerateConfirm ? (
               <div style={{ backgroundColor: '#78350f18', borderColor: '#B45309' }} className="mt-3 p-3 rounded-xl border space-y-2">
