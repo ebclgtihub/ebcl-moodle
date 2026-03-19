@@ -1,5 +1,49 @@
 # Release Notes
 
+## v2.0.0 - 2026-03-19
+
+### Aktualisieren-Modus
+- **Klassen aus Moodle laden** — bestehende Klassen eines Instituts werden direkt aus Moodle geladen (Gruppen + Mitglieder)
+- **Kombiniert-Modus „Aktualisieren & Neu anlegen"** — bestehende Klassen aktualisieren und neue Klassen anlegen in einem einzigen Durchlauf
+- Drei-Button-Toggle für den Einschreibe-Modus: prominenter Haupt-Button + zwei kleinere Buttons mit Tooltips
+- Trainer werden von der Mitgliederanzahl subtrahiert (korrekte Schüler-Zählung im Klassenpool)
+- Standardmäßig keine Klassen vorausgewählt — bewusste Auswahl durch Nutzer
+
+### Klassenübersicht-Popup
+- Neues „Klassenübersicht"-Modal zeigt pro Klasse: Name, Mitgliederzahl, Auswahlstatus
+- Abschnitt „Bereits eingeschrieben": zeigt bestehende Kurs-Einschreibungen (blau = im Pool, grau = nicht im Pool)
+- Abschnitt „Neu zugewiesen": zusätzliche Matrix-Zuweisungen in grün
+
+### Matrix-Verbesserungen
+- **Auto-Spalten**: Wenn eine Klasse ausgewählt wird, erscheinen ihre bestehenden Kurs-Einschreibungen automatisch als Spalten in der Matrix (RefreshCw-Icon)
+- **Auto-Pool-Befüllung**: Beim Laden der Klassen werden fehlende Kurs-Einschreibungen automatisch in freie Pool-Slots eingetragen; `courseSlotCount` wird bei Bedarf erhöht
+- Nur ausgewählte Klassen erscheinen in der Matrix (kein Dimmen — vollständiges Ausblenden)
+- Klassen-/Kurs-Zähler oben rechts zeigt nur aktive/sichtbare Einträge
+- Trennzeile zwischen bestehenden und neuen Klassen im Kombiniert-Modus
+
+### Kurspool & Einstellungen
+- **Neuer Tab „Kurse"** in den Einstellungen: Toggle zwischen Excel-Liste (Power Automate) und Moodle direkt
+- Excel-Modus: Vorschau aller gecachten Kurse mit Tag, Name, Shorthand
+- Moodle-Modus: Katalog-Browser zum gezielten Auswählen welche Kurse in der Matrix erscheinen
+- **CORS-Fix**: Kursabruf via Power Automate nutzt jetzt einen Rust-Command (umgeht CORS komplett, funktioniert mit beliebigen URLs)
+- Fix: Leere `courseApiUrl` verursachte 404-Fehler auf localhost — Guard eingebaut
+
+### Sicherheit & Persistenz
+- Hardcodierte API-Tokens aus Standardkonfiguration entfernt (bestehende Installationen behalten ihre gespeicherten Werte)
+- `courseApiUrl` und `sharepointUrl` werden jetzt korrekt gespeichert und beim Neustart wiederhergestellt
+
+### UI-Bereinigung
+- Institutübersicht in der Seitenleiste wiederhergestellt (nur wenn Zoho konfiguriert)
+- Kursübersicht und Institutübersicht aus der Hauptansicht entfernt (nur noch in Einstellungen)
+
+### Bugfixes
+- Fix: Klassen-Offset (`cNum` → `cLabel`) für korrekte Gruppenermittlung in Moodle
+- Fix: `classRows`-Initialisierungsreihenfolge in `activeMatrixCourses` behoben
+- Fix: Externe API-IDs (Power Automate) vs. numerische Moodle-IDs korrekt unterschieden (RefreshCw-Icon war nie sichtbar)
+- Umlaute im Institutsnamen werden automatisch ausgeschrieben (ä→ae, ö→oe, ü→ue, ß→ss)
+
+---
+
 ## v1.5.0 - 2026-03-16
 
 - feat: **Neu-anlegen-Modus** — vor der Generierung werden bestehende Moodle-Accounts abgefragt; neue Schüler/Trainer/Klassen werden fortlaufend ab der höchsten existierenden Nummer angelegt (kein Überschreiben)
@@ -27,59 +71,23 @@
 - feat: Standard-Einschreibedauer in den Einstellungen konfigurierbar
 - feat: Bestätigung bei ungewöhnlichen Eingabewerten
 - fix: Robustheit und Fehlerbehandlung verbessert
-- fix: Favoriten-Funktion entfernt (durch CRM-Einbindung ersetzt)
 
 ---
 
 ## v0.9.0 - 2026-03-09
-- feat: direct moodle upload
-
+- feat: Direkter Moodle-Upload
 
 ## v0.7.0 - 2026-03-09
-- Feat: Excel Export!
-
+- feat: Excel-Export
 
 ## v0.6.0 - 2026-03-09
-- Neue Funktionen: 
-    -SharePoint Export
-    -PowerAutomate Link einstellbar
-- Neue PDF änderungen!
-
-
-## v0.5.2 - 2026-03-06
-- Kein Changelog-Eintrag.
-## v0.5.1 - 2026-03-06
-- Kein Changelog-Eintrag.
-## v0.5.0 - 2026-03-05
-- Kein Changelog-Eintrag.
-## v0.4.8 - 2026-03-05
-- Besserer PDF Export 
-- Speicherung der Passworteinstellung
-
-## v0.4.5 - 2026-02-22
-Test release 2.0
-
-## v0.4.4 - 2026-02-22
-- Kein Changelog-Eintrag.
-## v0.4.3 - 2026-02-22
-- Test Release
-
-## v0.4.1 - 2026-02-22
-- PDF Spalte "Name" in Formfeld umgewandelt!
+- feat: SharePoint-Export; Power-Automate-Link konfigurierbar; PDF-Verbesserungen
 
 ## v0.3.0 - 2026-02-22
-- QR-Code-Anzeige für Schüler hinzugefügt
-- Automatische Passwort-Generierung implementiert
-- Offline-Cache für Kursdaten
-- Window-State wird beim Schließen gespeichert
-
-## v0.2.1 - 2026-01-01
-- PDF-Export-Fix
-- Daten-Reset beim Programmstart
+- feat: QR-Code für Schüler; automatische Passwortgenerierung; Offline-Cache; Window-State
 
 ## v0.2.0 - 2025-12-01
-- Auto-Updater integriert
-- UI-Verbesserungen
+- feat: Auto-Updater; UI-Verbesserungen
 
 ## v0.1.6 - 2025-11-01
 - Erstes stabiles Release
