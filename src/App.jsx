@@ -2085,6 +2085,7 @@ const App = () => {
     const STABS = [
       { id: 'allgemein', label: 'Allgemein', icon: <Settings size={12} /> },
       { id: 'klassen',   label: 'Klassen',   icon: <GraduationCap size={12} /> },
+      { id: 'kurse',     label: 'Kurse',     icon: <BookOpen size={12} /> },
       { id: 'anpassen',  label: 'Anpassen',  icon: <Tag size={12} /> },
       { id: 'backend',   label: 'Backend',   icon: <Upload size={12} /> },
     ];
@@ -2181,14 +2182,14 @@ const App = () => {
               }
             </div>
           </>}
-          {/* ── Backend ───────────────────────────────────────────── */}
-          {settingsTab === 'backend' && <>
-            {/* ── Kursquelle Toggle ── */}
+          {/* ── Kurse ─────────────────────────────────────────────── */}
+          {settingsTab === 'kurse' && <>
+            {/* Toggle */}
             <div>
               <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-2"><BookOpen size={14} /> Kursquelle</h4>
               <div style={{ borderColor: C.border }} className="flex rounded-xl border overflow-hidden">
                 <button
-                  onClick={() => { setConfig(p => ({ ...p, moodleBetaEnabled: false })); }}
+                  onClick={() => setConfig(p => ({ ...p, moodleBetaEnabled: false }))}
                   style={{ backgroundColor: !config.moodleBetaEnabled ? C.accent1 : C.subtle, color: !config.moodleBetaEnabled ? '#fff' : C.muted }}
                   className="flex-1 py-2 text-[10px] font-bold uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all"
                 >
@@ -2205,38 +2206,42 @@ const App = () => {
             </div>
 
             {!config.moodleBetaEnabled ? (
-              /* ── Power Automate ── */
-              <div>
-                <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Kursliste und SharePoint-Export werden über Power Automate abgerufen.</p>
-                <div className="space-y-3">
-                  {[
-                    { label: 'Kursliste (POST)', name: 'courseApiUrl' },
-                    { label: 'SharePoint Export', name: 'sharepointUrl' },
-                  ].map(f => (
-                    <div key={f.name} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
-                      <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
-                      <input type="text" value={config[f.name]}
-                        onChange={e => setConfig(p => ({ ...p, [f.name]: e.target.value }))}
-                        placeholder="https://prod-xx.logic.azure.com/…"
-                        style={{ color: C.text, backgroundColor: 'transparent' }}
-                        className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
-                    </div>
-                  ))}
-                </div>
+              /* ── Power Automate / Excel ── */
+              <div className="space-y-3">
+                <p style={{ color: C.muted }} className="text-[10px] opacity-60">Kursliste wird über Power Automate abgerufen (URL in Einstellungen → Backend).</p>
                 <button
                   onClick={fetchCoursePool}
                   disabled={isLoadingPool || !config.courseApiUrl?.trim()}
                   style={{ color: C.accent1, borderColor: C.accent1 + '40' }}
-                  className="mt-3 flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase hover:opacity-80 disabled:opacity-40 transition-all"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-bold uppercase hover:opacity-80 disabled:opacity-40 transition-all"
                 >
                   <RefreshCw size={12} className={isLoadingPool ? 'animate-spin' : ''} />
-                  Kursliste neu laden ({courseDictionary.length} gecacht)
+                  Kursliste neu laden
                 </button>
+                {/* Vorschau aller gecachten Kurse */}
+                {courseDictionary.length > 0 && (
+                  <div>
+                    <p style={{ color: C.muted }} className="text-[9px] font-bold uppercase tracking-widest mb-1.5">{courseDictionary.length} Kurse im Cache</p>
+                    <div style={{ borderColor: C.border }} className="border rounded-xl overflow-auto max-h-64">
+                      {courseDictionary.map((c, i) => (
+                        <div key={c.id} style={{ borderColor: C.border }} className="flex items-center gap-3 px-3 py-2 border-b last:border-0 hover:bg-black/5">
+                          <span style={{ color: C.muted }} className="text-[9px] font-mono w-6 shrink-0 text-right">{i + 1}</span>
+                          {c.tag ? <span style={{ backgroundColor: getTagColor(c.tag), color: '#fff' }} className="text-[8px] font-bold px-1.5 py-0.5 rounded shrink-0">{c.tag}</span> : null}
+                          <span style={{ color: C.text }} className="text-[11px] flex-1 font-medium truncate">{c.label}</span>
+                          <span style={{ color: C.muted }} className="text-[9px] font-mono shrink-0">{c.shorthand}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {courseDictionary.length === 0 && !isLoadingPool && (
+                  <p style={{ color: C.muted }} className="text-[10px] italic opacity-60">Kein Cache — URL eingeben und „Kursliste neu laden" klicken.</p>
+                )}
               </div>
             ) : (
-              /* ── Moodle Kurskatalog ── */
+              /* ── Moodle direkt ── */
               <div className="space-y-3">
-                <p style={{ color: C.muted }} className="text-[10px] opacity-60">Kurse werden direkt von Moodle abgerufen. Wähle aus, welche Kurse in der Matrix erscheinen sollen.</p>
+                <p style={{ color: C.muted }} className="text-[10px] opacity-60">Kurse werden direkt von Moodle abgerufen. Wähle aus, welche in der Matrix erscheinen sollen.</p>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={fetchMoodleCoursesCatalog}
@@ -2279,12 +2284,8 @@ const App = () => {
                             {courses.map(c => {
                               const selected = (config.moodleBetaCourseIds ?? []).includes(c.id);
                               return (
-                                <button
-                                  key={c.id}
-                                  onClick={() => {
-                                    const ids = config.moodleBetaCourseIds ?? [];
-                                    setConfig(p => ({ ...p, moodleBetaCourseIds: selected ? ids.filter(id => id !== c.id) : [...ids, c.id] }));
-                                  }}
+                                <button key={c.id}
+                                  onClick={() => { const ids = config.moodleBetaCourseIds ?? []; setConfig(p => ({ ...p, moodleBetaCourseIds: selected ? ids.filter(id => id !== c.id) : [...ids, c.id] })); }}
                                   style={{ borderColor: C.border, backgroundColor: selected ? (C.accent2 + '15') : 'transparent' }}
                                   className="w-full flex items-center gap-3 px-3 py-2 border-b last:border-0 hover:bg-black/5 transition-colors text-left"
                                 >
@@ -2306,7 +2307,30 @@ const App = () => {
                 )}
               </div>
             )}
-            <div className="mt-4">
+          </>}
+
+          {/* ── Backend ───────────────────────────────────────────── */}
+          {settingsTab === 'backend' && <>
+            <div>
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Upload size={14} /> Power Automate</h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">URLs für Kursliste und SharePoint-Export.</p>
+              <div className="space-y-3">
+                {[
+                  { label: 'Kursliste URL (POST)', name: 'courseApiUrl', ph: 'https://prod-xx.logic.azure.com/…' },
+                  { label: 'SharePoint Export', name: 'sharepointUrl', ph: 'https://prod-xx.logic.azure.com/…' },
+                ].map(f => (
+                  <div key={f.name} style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">
+                    <label style={{ color: C.muted }} className="text-[9px] font-semibold uppercase block mb-1.5">{f.label}</label>
+                    <input type="text" value={config[f.name]}
+                      onChange={e => setConfig(p => ({ ...p, [f.name]: e.target.value }))}
+                      placeholder={f.ph}
+                      style={{ color: C.text, backgroundColor: 'transparent' }}
+                      className="w-full text-[10px] font-mono outline-none placeholder:opacity-30" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
               <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
                 <GraduationCap size={14} /> Moodle REST API
               </h4>
@@ -3052,6 +3076,12 @@ const App = () => {
 
           {/* Actions */}
           <section style={{ backgroundColor: C.card, borderColor: C.border }} className="p-4 rounded-3xl border shadow-sm shrink-0">
+            {zohoEnabled && (
+              <button onClick={() => { setInstituteSearch(''); setActiveModal('institutePreview'); }} style={{ color: C.muted, backgroundColor: C.subtle, borderColor: C.border }} className="w-full mb-3 py-2 border rounded-xl text-[10px] font-bold uppercase tracking-widest hover:opacity-80 transition-all flex items-center justify-center gap-2">
+                <Building2 size={14} /> Institutübersicht
+                {zohoAllAccounts.length > 0 && <span style={{ backgroundColor: C.main + '22', color: C.main }} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold">{zohoAllAccounts.length}</span>}
+              </button>
+            )}
 
             {showGenerateConfirm ? (
               <div style={{ backgroundColor: '#78350f18', borderColor: '#B45309' }} className="mt-3 p-3 rounded-xl border space-y-2">
