@@ -1466,7 +1466,7 @@ const App = () => {
       }
 
       setMoodleGroups(groups);
-      setSelectedMoodleGroupIds(new Set(groups.map(g => g.id)));
+      setSelectedMoodleGroupIds(new Set()); // standardmäßig keine Klasse ausgewählt
       setClassMatrix(newMatrix);
       setLockedClassCourseMap(newLocked);
       addToast(`${groups.length} Klasse(n) aus Moodle geladen.`, 'success');
@@ -3296,12 +3296,12 @@ const App = () => {
                       <>
                         <div className="flex items-center justify-between mb-2">
                           <span style={{ color: C.muted }} className="text-[9px] font-semibold uppercase">{moodleGroups.length} Klasse(n)</span>
-                          <div className="flex items-center gap-2">
-                            <button onClick={() => setActiveModal('classPool')} style={{ color: C.accent1 }} className="text-[9px] hover:opacity-70 flex items-center gap-1 font-semibold">
-                              <Eye size={10} /> Details
+                          <div className="flex items-center gap-1.5">
+                            <button onClick={() => setActiveModal('classPool')} style={{ backgroundColor: C.accent1 + '15', color: C.accent1, borderColor: C.accent1 + '40' }} className="text-[9px] hover:brightness-110 flex items-center gap-1 font-semibold px-2 py-1 rounded-lg border transition-all">
+                              <GraduationCap size={10} /> Klassenübersicht
                             </button>
-                            <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1">
-                              <X size={10} /> Zurücksetzen
+                            <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1 px-1.5 py-1">
+                              <X size={10} />
                             </button>
                           </div>
                         </div>
