@@ -635,9 +635,17 @@ export async function fetchInstituteGroups(baseUrl, token, institute, allCourseI
     for (const g of groups) {
       if (!g.name.startsWith(prefix)) continue;
       if (!groupsMap.has(g.name)) {
-        groupsMap.set(g.name, { id: g.id, name: g.name, courseId, existingCourseIds: new Set([courseId]), memberCount: 0 });
+        groupsMap.set(g.name, {
+          id: g.id, name: g.name, courseId,
+          // Alle (courseId, groupId)-Paare speichern — für Mitglieder-Lookup nötig,
+          // da die Schüler u.U. nur in manchen Kurs-Gruppen eingeschrieben sind.
+          allEntries: [{ courseId, groupId: g.id }],
+          existingCourseIds: new Set([courseId]), memberCount: 0,
+        });
       } else {
-        groupsMap.get(g.name).existingCourseIds.add(courseId);
+        const entry = groupsMap.get(g.name);
+        entry.existingCourseIds.add(courseId);
+        entry.allEntries.push({ courseId, groupId: g.id });
       }
     }
   }
@@ -647,34 +655,35 @@ export async function fetchInstituteGroups(baseUrl, token, institute, allCourseI
   const groups = [...groupsMap.values()];
   const instClean = institute.replace(/\s+/g, '').toLowerCase();
 
-  // Gruppengrößen ermitteln — Trainer per Wildcard einmalig holen statt alle Enrollments pro Kurs
-  try {
-    const [memberships, trainerRes] = await Promise.all([
-      callMoodle(baseUrl, token, 'core_group_get_group_members', { groupids: groups.map(g => g.id) }),
-      callMoodle(baseUrl, token, 'core_user_get_users', {
-        // email unterstützt %-Wildcard, username nicht (Moodle Docs)
-        criteria: [{ key: 'email', value: `trainer%@${instClean}.com` }],
-      }),
-    ]);
-
-    const trainerIds = new Set(
-      (trainerRes?.users ?? trainerRes ?? []).map(u => u.id).filter(Boolean)
-    );
-
-    if (Array.isArray(memberships)) {
-      memberships.forEach(m => {
-        const g = groups.find(x => x.id === m.groupid);
-        if (!g) return;
-        g.memberCount = (m.userids || []).filter(id => !trainerIds.has(id)).length;
-      });
+  // Gruppengrößen ermitteln: alle (courseId, groupId)-Paare der Gruppe durchprobieren bis
+  // Mitglieder gefunden werden. Schüler sind nur in manchen Kurs-Gruppen eingeschrieben —
+  // der erste Kurs in allEntries (paralleles Promise.all, nicht-deterministisch) muss nicht
+  // derjenige mit Mitgliedern sein.
+  await Promise.all(groups.map(async g => {
+    for (const { courseId, groupId } of g.allEntries) {
+      try {
+        const users = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', {
+          courseid: courseId,
+          options: [{ name: 'groupid', value: groupId }],
+        });
+        if (Array.isArray(users) && users.length > 0) {
+          // Primäres courseId/id auf den Kurs setzen der tatsächlich Mitglieder hat —
+          // fetchGroupMembers in generateList verwendet diese Werte.
+          g.courseId = courseId;
+          g.id = groupId;
+          g.memberCount = users.filter(u => !u.username?.includes(`${instClean}-trainer-`)).length;
+          g.trainerCount = users.filter(u => u.username?.includes(`${instClean}-trainer-`)).length;
+          return; // gefunden, restliche Kurse dieser Gruppe nicht mehr prüfen
+        }
+      } catch (e) {
+        console.warn(`[Moodle] fetchInstituteGroups: ${g.name} in Kurs ${courseId}:`, e.message);
+      }
     }
-  } catch (e) {
-    console.warn('[Moodle] fetchInstituteGroups: Mitgliederanzahl fehlgeschlagen:', e.message);
-  }
+  }));
 
-  // Set → Array für Serialisierung
+  // Set → Array für Serialisierung; allEntries ist internes Hilfsmittel, nicht nach außen
   return groups
-    .map(g => ({ ...g, existingCourseIds: [...g.existingCourseIds] }))
+    .map(({ allEntries: _allEntries, ...g }) => ({ ...g, existingCourseIds: [...g.existingCourseIds] }))
     .sort((a, b) => a.name.localeCompare(b.name, 'de'));
 }
 

@@ -2688,6 +2688,11 @@ const App = () => {
                         <Users size={10} />{g.memberCount} Schüler
                       </span>
                     )}
+                    {g.trainerCount > 0 && (
+                      <span style={{ backgroundColor: C.accent2 + '15', borderColor: C.accent2 + '40', color: C.accent2 }} className="text-[10px] font-semibold px-2.5 py-1 rounded-full border flex items-center gap-1.5">
+                        <GraduationCap size={10} />{g.trainerCount} Trainer
+                      </span>
+                    )}
                     <span style={{ backgroundColor: isSelected ? C.accent1 + '20' : C.subtle, borderColor: isSelected ? C.accent1 : C.border, color: isSelected ? C.accent1 : C.muted }} className="text-[9px] font-bold px-2 py-1 rounded-full border uppercase">
                       {isSelected ? 'Ausgewählt' : 'Nicht ausgewählt'}
                     </span>
