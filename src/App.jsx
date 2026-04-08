@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
-import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers } from './moodle';
+import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers, fetchInstituteUsers } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
@@ -606,12 +606,6 @@ const App = () => {
       .filter(c => c && c.id !== 'none'),
     [config.selectedPoolCourseIds, config.courseSlotCount, courseDictionary]);
 
-  const totals = useMemo(() => {
-    let std = 0;
-    Object.entries(config.classCounts).forEach(([i, n]) => { std += (config.classSizes[parseInt(i)] || 0) * n; });
-    return { cls: Object.values(config.classCounts).reduce((a, b) => a + b, 0), std, trainers: config.trainerCount, all: std + config.trainerCount };
-  }, [config.classCounts, config.classSizes, config.trainerCount]);
-
   const classRows = useMemo(() => {
     const buildNewRows = (startId) => {
       const rows = []; let id = startId;
@@ -650,6 +644,11 @@ const App = () => {
     }
     return buildNewRows(1);
   }, [enrolMode, moodleGroups, config.classCounts, config.classSizes, config.classCustomSizes]);
+
+  const totals = useMemo(() => {
+    const std = classRows.reduce((s, r) => s + r.size, 0);
+    return { cls: classRows.length, std, trainers: config.trainerCount, all: std + config.trainerCount };
+  }, [classRows, config.trainerCount]);
 
   const rawEndDate = useMemo(() => {
     const d = new Date(config.enrolDate);
@@ -902,6 +901,20 @@ const App = () => {
         }
       }
 
+      // --- Fehlende Trainer nachladen (falls alle bestehenden Gruppen leer waren) ---
+      // Wenn nonEmptyExistingRows leer war, wurden noch keine Trainer per fetchGroupMembers geladen.
+      // Fallback: alle Institut-User holen, nur Trainer filtern.
+      if (nonEmptyExistingRows.length === 0 && config.moodleUrl?.trim() && config.moodleToken?.trim()) {
+        try {
+          const allUsers = await fetchInstituteUsers(config.moodleUrl, config.moodleToken, instClean);
+          for (const u of allUsers) {
+            if (!u.username || !u.username.includes(`${instClean}-trainer-`) || usernameSet.has(u.username)) continue;
+            usernameSet.add(u.username);
+            data.push({ cNum: 'ALL', isT: true, first: u.firstname || 'Trainer', last: u.lastname || config.institute, user: u.username, mail: u.email || `${u.username}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+          }
+        } catch { /* nicht-kritisch — Trainer werden ggf. über trainerCount abgedeckt */ }
+      }
+
       // --- Neue Klassen (nur im 'both'-Modus) + leere wiederverwendete Gruppen ---
       const newRows = enrolMode === 'both' ? effectiveClassRows.filter(r => r.isNew) : [];
       const rowsNeedingNewStudents = [...emptyReuseRows, ...newRows];
@@ -910,11 +923,13 @@ const App = () => {
         classGroupOffsetRef.current = moodleGroups.length;
         if (config.moodleUrl?.trim() && config.moodleToken?.trim()) {
           setIsFindingMaxNumbers(true);
+          const activeCourseIds = activeMatrixCourses.map(c => {
+            const numId = parseInt(String(c?.id ?? ''), 10);
+            if (!isNaN(numId) && numId > 0) return numId;
+            if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) return parseInt(m[1], 10); }
+            return null;
+          }).filter(Boolean);
           try {
-            const activeCourseIds = activeMatrixCourses.map(c => {
-              const numId = parseInt(String(c?.id ?? ''), 10);
-              return (!isNaN(numId) && numId > 0) ? numId : null;
-            }).filter(Boolean);
             const { maxStudent, maxTrainer } = await findMaxNumbers(config.moodleUrl, config.moodleToken, instClean, activeCourseIds);
             studentOffset = maxStudent;
             trainerOffset = maxTrainer;
@@ -1023,14 +1038,26 @@ const App = () => {
       const tNum = trainerOffset + t;
       data.push({ cNum: 'ALL', isT: true, first: 'Trainer', last: config.institute, user: `${instClean}-trainer-${tNum}`, mail: `trainer${tNum}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
     }
+    // Map: App-Kurs-ID (String) → Moodle-Kurs-ID (Number) — für kursbasierten Gruppen-Abgleich
+    const appToMoodleId = new Map();
+    activeMatrixCourses.forEach(c => {
+      const numId = parseInt(String(c?.id ?? ''), 10);
+      if (!isNaN(numId) && numId > 0) { appToMoodleId.set(String(c.id), numId); return; }
+      if (c?.url) { const m = String(c.url).match(/[?&]id=(\d+)/); if (m) appToMoodleId.set(String(c.id), parseInt(m[1], 10)); }
+    });
     let sIdx = studentOffset + 1;
-    let emptyGroupIdx = 0;
+    const remainingEmptyGroups = [...emptyGroupsQueue]; // mutable Kopie, wird bei Treffer gespleißt
     effectiveClassRows.forEach(r => {
+      if (r.size === 0) return; // keine Schüler → keine Gruppe verbrauchen
       const selIds = (classMatrix[r.id] || []).map(String);
       const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
-      // Leere bestehende Gruppe wiederverwenden, sonst neue Bezeichnung generieren
-      const classLabel = emptyGroupIdx < emptyGroupsQueue.length
-        ? emptyGroupsQueue[emptyGroupIdx++].name
+      // Leere Gruppe nur wiederverwenden wenn sie in mindestens einem konfigurierten Kurs existiert
+      const selMoodleIds = new Set(selIds.map(id => appToMoodleId.get(id)).filter(Boolean));
+      const matchIdx = remainingEmptyGroups.findIndex(g =>
+        (g.existingCourseIds || []).some(cId => selMoodleIds.has(Number(cId)))
+      );
+      const classLabel = matchIdx >= 0
+        ? remainingEmptyGroups.splice(matchIdx, 1)[0].name
         : `${config.institute}-${getClassLabel(r)}`;
       for (let i = 0; i < r.size; i++) {
         const id = String(sIdx++).padStart(3, '0');
@@ -1959,6 +1986,7 @@ const App = () => {
                 <div className="space-y-1">
                   {[
                     'core_user_create_users',
+                    'core_user_get_users',
                     'core_user_get_users_by_field',
                     'enrol_manual_enrol_users',
                     'core_group_create_groups',
@@ -2359,7 +2387,9 @@ const App = () => {
           {/* ── Backend ───────────────────────────────────────────── */}
           {settingsTab === 'backend' && <>
             <div>
-              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1"><Upload size={14} /> Power Automate</h4>
+              <div className="flex items-center justify-between mb-1">
+                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2"><Upload size={14} /> Power Automate</h4>
+              </div>
               <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">URLs für Kursliste und SharePoint-Export.</p>
               <div className="space-y-3">
                 {[
@@ -2407,9 +2437,11 @@ const App = () => {
               </div>
             </div>
             <div className="mt-4">
-              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
-                <Users size={14} /> Zoho CRM
-              </h4>
+              <div className="flex items-center justify-between mb-1">
+                <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                  <Users size={14} /> Zoho CRM
+                </h4>
+              </div>
               <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Nach Moodle-Einschreibung wird automatisch eine Notiz im CRM hinterlegt. Aktiv sobald alle drei Felder befüllt sind.</p>
               <div className="space-y-3">
                 <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm focus-within:border-blue-300 transition-colors">

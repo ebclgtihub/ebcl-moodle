@@ -10,7 +10,7 @@
  * Voraussetzungen auf der Moodle-Seite:
  *  - Web Service mit Token aktiviert
  *  - Token hat Berechtigungen für:
- *    core_user_create_users, core_user_get_users_by_field,
+ *    core_user_create_users, core_user_get_users, core_user_get_users_by_field,
  *    enrol_manual_enrol_users, core_group_create_groups,
  *    core_group_get_course_groups, core_group_get_group_members, core_group_add_group_members,
  *    core_cohort_search_cohorts, core_cohort_create_cohorts, core_cohort_add_cohort_members,
@@ -94,19 +94,6 @@ async function chunkedParallel(items, chunkSize, fn) {
   return results;
 }
 
-/**
- * Ruft eine Moodle-API mit einer Liste von Items in Batches auf.
- * chunkSize so wählen dass POST-Parameter < max_input_vars (Standard 1000).
- */
-async function batchedCall(baseUrl, token, wsfunction, itemsKey, items, chunkSize = 200) {
-  const results = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    const chunk = items.slice(i, i + chunkSize);
-    const res = await callMoodle(baseUrl, token, wsfunction, { [itemsKey]: chunk });
-    if (Array.isArray(res)) results.push(...res);
-  }
-  return results;
-}
 
 /**
  * Ermittelt die numerische Moodle-Kurs-ID aus einem Kurs-Objekt.
@@ -136,9 +123,7 @@ function extractMoodleCourseId(course) {
  * @param {string}   opts.token             - Moodle Web Service Token
  * @param {object[]} opts.generatedData     - Generierte Account-Daten (aus generateList)
  * @param {object[]} opts.activeMatrixCourses - Aktive Kurse aus der Matrix
- * @param {object[]} opts.classRows         - Klassen-Zeilen
  * @param {object}   opts.config            - App-Konfiguration (institute, enrolDate, enrolPeriod, …)
- * @param {Function} opts.getClassLabel     - Gibt den Label einer Klassen-Zeile zurück
  * @param {Function} [opts.onProgress]      - Callback für Fortschritts-Meldungen (string)
  * @returns {Promise<{usersCreated, enrolmentsDone, groupsCreated, warnings}>}
  */
@@ -147,9 +132,7 @@ export async function enrollInMoodle({
   token,
   generatedData,
   activeMatrixCourses,
-  classRows,
   config,
-  getClassLabel,
   onProgress,
 }) {
   const report = (label, pct) => onProgress?.(label, pct);
@@ -191,23 +174,40 @@ export async function enrollInMoodle({
   const warnings = [];
   let usersCreated = 0;
 
-  // ── Schritt 1a: Bereits bestehende User suchen (in 200er-Chunks) ─────────
+  // ── Schritt 1a: Bestehende Institut-User laden (Kohorte via E-Mail-Wildcard) ───
+  // core_user_get_users mit email-Wildcard findet alle Institut-User in 1 Call.
+  // Hinweis: username-Feld unterstützt kein %-Wildcard (Moodle Docs bestätigt),
+  //          email/firstname/lastname dagegen schon.
+  // Fallback auf core_user_get_users_by_field falls der Token die Funktion nicht hat.
   report('Bestehende Accounts prüfen…', 10);
-  try {
-    const usernames = generatedData.map(u => u.user);
-    const chunkSize = 200; // sicher unter PHP max_input_vars
-    const existing = [];
-    for (let i = 0; i < usernames.length; i += chunkSize) {
-      const chunk = usernames.slice(i, i + chunkSize);
-      try {
-        const res = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: chunk });
-        if (Array.isArray(res)) existing.push(...res);
-      } catch (e) { console.warn('[Moodle] Vorprüfung chunk fehlgeschlagen:', e.message); }
+  const instClean = (config.institute || '').replace(/\s+/g, '').toLowerCase();
+  {
+    let wildcardSucceeded = false;
+    try {
+      const res = await callMoodle(baseUrl, token, 'core_user_get_users', {
+        criteria: [{ key: 'email', value: `%@${instClean}.com` }],
+      });
+      const users = res?.users ?? (Array.isArray(res) ? res : []);
+      users.forEach(u => { if (u.username && u.id) userIdMap[u.username] = u.id; });
+      wildcardSucceeded = true;
+    } catch (e) { console.warn('[Moodle] Wildcard-Vorprüfung fehlgeschlagen:', e.message); }
+
+    // Fallback: core_user_get_users_by_field mit exakten Usernamen aus generatedData
+    if (!wildcardSucceeded) {
+      const usernames = generatedData.map(u => u.user?.trim().toLowerCase()).filter(Boolean);
+      const chunkSize = 200;
+      for (let i = 0; i < usernames.length; i += chunkSize) {
+        try {
+          const res = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', {
+            field: 'username', values: usernames.slice(i, i + chunkSize),
+          });
+          if (Array.isArray(res)) res.forEach(u => { if (u.username && u.id) userIdMap[u.username] = u.id; });
+        } catch (e) { console.warn('[Moodle] Vorprüfung chunk fehlgeschlagen:', e.message); }
+      }
     }
-    existing.forEach(u => { userIdMap[u.username] = u.id; });
-    if (existing.length > 0) warnings.push(`${existing.length} User bereits vorhanden — werden wiederverwendet.`);
-  } catch (e) {
-    console.warn('[Moodle] Vorprüfung fehlgeschlagen:', e.message);
+
+    const existingCount = Object.keys(userIdMap).length;
+    if (existingCount > 0) warnings.push(`${existingCount} User bereits vorhanden — werden wiederverwendet.`);
   }
 
   // ── Schritt 1b: Nur neue User anlegen ─────────────────────────────────────
@@ -232,8 +232,9 @@ export async function enrollInMoodle({
           } catch {
             // User existiert evtl. bereits — per Lookup nachholen
             try {
-              const found = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: [user.username] });
-              if (Array.isArray(found) && found[0]) { userIdMap[found[0].username] = found[0].id; }
+              const found = await callMoodle(baseUrl, token, 'core_user_get_users', { criteria: [{ key: 'username', value: user.username }] });
+              const match = (found?.users ?? found ?? [])[0];
+              if (match) { userIdMap[match.username] = match.id; }
               else warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
             } catch { warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`); }
           }
@@ -250,29 +251,18 @@ export async function enrollInMoodle({
   // ── Schritt 2: Gruppen vorbereiten ─────────────────────────────────────────
   report('Klassen-Gruppen vorbereiten…', 40);
 
-  // Klassen-Label-Map: classId (number) → vollständiger Gruppenname
-  const classLabelById = {};
-  classRows.forEach(r => {
-    classLabelById[r.id] = `${config.institute?.trim()}-${getClassLabel(r)}`;
-  });
-
-  // Welche Gruppen werden benötigt? Pro Kurs eine Gruppe je Klasse, die diesen Kurs hat.
+  // Welche Gruppen werden benötigt? Direkt aus generatedData[].cLabel ableiten —
+  // nicht über classLabelById, da cLabel bei Gruppen-Wiederverwendung vom berechneten
+  // Namen abweichen kann (z.B. "Institute-1A" statt "Institute-3A" mit Offset).
   const groupsNeededMap = new Map(); // key `${courseid}:${name}` → {courseid, name}
-  coursesWithIds.forEach(course => {
-    classRows.forEach(r => {
-      const hasStudents = generatedData.some(
-        u =>
-          !u.isT &&
-          u.cLabel === classLabelById[r.id] &&
-          u.courses.some(uc => extractMoodleCourseId(uc) === course.moodleId)
-      );
-      if (hasStudents) {
-        const groupName = classLabelById[r.id];
-        groupsNeededMap.set(`${course.moodleId}:${groupName}`, {
-          courseid: course.moodleId,
-          name: groupName,
-        });
-      }
+  const activeMoodleIdSet = new Set(coursesWithIds.map(c => c.moodleId));
+  generatedData.forEach(u => {
+    if (u.isT || !u.cLabel) return;
+    u.courses.forEach(course => {
+      const moodleId = extractMoodleCourseId(course);
+      if (!moodleId || !activeMoodleIdSet.has(moodleId)) return;
+      const key = `${moodleId}:${u.cLabel}`;
+      if (!groupsNeededMap.has(key)) groupsNeededMap.set(key, { courseid: moodleId, name: u.cLabel });
     });
   });
 
@@ -521,67 +511,63 @@ export async function enrollInMoodle({
  */
 
 /**
- * @param {number[]} activeCourseIds – Kurse der aktuellen Matrix (für Enrollment-Check)
+ * Gibt alle Moodle-User des Instituts zurück (via Email-Wildcard *@instClean.com).
+ * Nützlich um bestehende Trainer zu laden wenn keine Gruppenabfrage möglich ist.
+ */
+export async function fetchInstituteUsers(baseUrl, token, instClean) {
+  try {
+    const res = await callMoodle(baseUrl, token, 'core_user_get_users', {
+      criteria: [{ key: 'email', value: `%@${instClean}.com` }],
+    });
+    return res?.users ?? [];
+  } catch (e) {
+    console.warn('[Moodle] fetchInstituteUsers fehlgeschlagen:', e.message);
+    return [];
+  }
+}
+
+/**
+ * @param {number[]} activeCourseIds – Fallback: Kurse für Enrollment-Abfrage wenn Wildcard leer
  */
 export async function findMaxNumbers(baseUrl, token, instClean, activeCourseIds = []) {
   let maxStudent = 0;
   let maxTrainer = 0;
-  let foundUsers = [];
 
-  // Zwei getrennte Calls — verhindert Überschreitung von PHP max_input_vars (Default: 1000).
-  const studentCandidates = [];
-  for (let i = 1; i <= 999; i++)
-    studentCandidates.push(`${instClean}-student-${String(i).padStart(3, '0')}`);
-
-  const trainerCandidates = [];
-  for (let t = 1; t <= 99; t++)
-    trainerCandidates.push(`${instClean}-trainer-${t}`);
-
-  const [studentResult, trainerResult] = await Promise.allSettled([
-    callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: studentCandidates }),
-    callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: trainerCandidates }),
-  ]);
-  if (studentResult.status === 'fulfilled' && Array.isArray(studentResult.value)) foundUsers.push(...studentResult.value);
-  if (trainerResult.status === 'fulfilled' && Array.isArray(trainerResult.value)) foundUsers.push(...trainerResult.value);
-  if (studentResult.status === 'rejected') console.warn('[Moodle] findMaxNumbers: student lookup failed:', studentResult.reason?.message);
-  if (trainerResult.status === 'rejected') console.warn('[Moodle] findMaxNumbers: trainer lookup failed:', trainerResult.reason?.message);
-
-  // Enrollment-IDs aus aktiven Kursen (für maxStudent/maxTrainer — nur eingeschriebene zählen)
-  const enrolledUserIds = new Set();
-  let enrollmentFetchSucceeded = false;
-  for (const courseid of activeCourseIds) {
-    try {
-      const enrolled = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', { courseid });
-      enrollmentFetchSucceeded = true;
-      if (Array.isArray(enrolled)) {
-        enrolled.forEach(u => { if (u.id) enrolledUserIds.add(u.id); });
-      }
-    } catch (e) {
-      console.warn('[Moodle] findMaxNumbers: enrollment fetch failed:', e.message);
-    }
-  }
-
-  // Nur eingeschriebene Accounts zählen für maxStudent/maxTrainer.
-  // Fallback auf alle foundUsers wenn kein Enrollment-Fetch geklappt hat
-  // (z.B. fehlende Berechtigung) — verhindert dass maxStudent fälschlicherweise 0 wird.
-  const enrolledUsers = (activeCourseIds.length > 0 && enrollmentFetchSucceeded)
-    ? foundUsers.filter(u => u.id && enrolledUserIds.has(u.id))
-    : foundUsers;
-
-  enrolledUsers.forEach(u => {
-    const sm = u.username?.match(/-student-(\d+)$/i);
+  const applyUsers = users => users.forEach(u => {
+    const sm = u.username?.match(new RegExp(`^${instClean}-student-(\\d+)$`, 'i'));
     if (sm) maxStudent = Math.max(maxStudent, parseInt(sm[1], 10));
-    const tm = u.username?.match(/-trainer-(\d+)$/i);
+    const tm = u.username?.match(new RegExp(`^${instClean}-trainer-(\\d+)$`, 'i'));
     if (tm) maxTrainer = Math.max(maxTrainer, parseInt(tm[1], 10));
   });
 
-  // Geister-Accounts nur melden wenn Enrollment-Fetch erfolgreich war.
-  // Sonst ist enrolledUserIds leer → alle foundUsers wären fälschlich als Geister markiert.
-  const orphanUsernames = (activeCourseIds.length > 0 && enrollmentFetchSucceeded)
-    ? foundUsers.filter(u => u.id && !enrolledUserIds.has(u.id)).map(u => u.username)
-    : [];
+  // Email-Wildcard — username unterstützt kein %, email schon (Moodle-Doku).
+  // Leere Antwort (0 User) = erstes Institut → maxStudent/maxTrainer = 0 → bei 1 starten. Korrekt.
+  // Nur bei Exception (Token-Fehler, Netzwerk) auf Enrollment-Daten zurückfallen.
+  let wildcardFailed = false;
+  try {
+    const res = await callMoodle(baseUrl, token, 'core_user_get_users', {
+      criteria: [{ key: 'email', value: `%@${instClean}.com` }],
+    });
+    applyUsers(res?.users ?? []);
+  } catch (e) {
+    wildcardFailed = true;
+    console.warn('[Moodle] findMaxNumbers: Email-Wildcard fehlgeschlagen:', e.message);
+  }
 
-  return { maxStudent, maxTrainer, orphanUsernames };
+  // Fallback: nur bei echtem API-Fehler — Enrollment-Daten als Notlösung
+  if (wildcardFailed && activeCourseIds.length > 0) {
+    console.warn('[Moodle] findMaxNumbers: Fallback auf Enrollment-Daten');
+    const enrolledById = new Map();
+    for (const courseid of activeCourseIds) {
+      try {
+        const enrolled = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', { courseid });
+        if (Array.isArray(enrolled)) enrolled.forEach(u => { if (u.id && u.username) enrolledById.set(u.id, u); });
+      } catch (e) { console.warn('[Moodle] findMaxNumbers fallback enrollment failed:', e.message); }
+    }
+    applyUsers([...enrolledById.values()]);
+  }
+
+  return { maxStudent, maxTrainer, orphanUsernames: [] };
 }
 
 /**
@@ -600,7 +586,8 @@ export async function fetchFullEnrollments(baseUrl, token, generatedData, userId
   const courseById = {};
   courseDictionary.forEach(c => { courseById[String(c.id)] = c; });
 
-  const enriched = await Promise.all(generatedData.map(async (d) => {
+  // 10 parallele Calls — unbegrenztes Promise.all kann Moodle bei >100 Usern überlasten
+  const enriched = await chunkedParallel(generatedData, 10, async (d) => {
     const userId = userIdMap?.[d.user?.trim().toLowerCase()];
     if (!userId) return d;
     try {
@@ -621,7 +608,7 @@ export async function fetchFullEnrollments(baseUrl, token, generatedData, userId
       console.warn('[Moodle] fetchFullEnrollments: failed for', d.user, e.message);
     }
     return d;
-  }));
+  });
   return enriched;
 }
 
@@ -660,34 +647,25 @@ export async function fetchInstituteGroups(baseUrl, token, institute, allCourseI
   const groups = [...groupsMap.values()];
   const instClean = institute.replace(/\s+/g, '').toLowerCase();
 
-  // Gruppengrößen + Trainer-IDs pro Kurs ermitteln
+  // Gruppengrößen ermitteln — Trainer per Wildcard einmalig holen statt alle Enrollments pro Kurs
   try {
-    const memberships = await callMoodle(baseUrl, token, 'core_group_get_group_members', {
-      groupids: groups.map(g => g.id),
-    });
+    const [memberships, trainerRes] = await Promise.all([
+      callMoodle(baseUrl, token, 'core_group_get_group_members', { groupids: groups.map(g => g.id) }),
+      callMoodle(baseUrl, token, 'core_user_get_users', {
+        // email unterstützt %-Wildcard, username nicht (Moodle Docs)
+        criteria: [{ key: 'email', value: `trainer%@${instClean}.com` }],
+      }),
+    ]);
 
-    // Trainer-UserIDs pro Kurs laden (eine Abfrage pro eindeutigem Kurs)
-    const uniqueCourseIds = [...new Set(groups.map(g => g.courseId))];
-    const trainerIdsByCourse = new Map(); // courseId → Set<userId>
-    await Promise.all(uniqueCourseIds.map(async courseId => {
-      try {
-        const users = await callMoodle(baseUrl, token, 'core_enrol_get_enrolled_users', { courseid: courseId });
-        const trainerIds = new Set(
-          (Array.isArray(users) ? users : [])
-            .filter(u => u.username?.includes(`${instClean}-trainer-`))
-            .map(u => u.id)
-        );
-        trainerIdsByCourse.set(courseId, trainerIds);
-      } catch { trainerIdsByCourse.set(courseId, new Set()); }
-    }));
+    const trainerIds = new Set(
+      (trainerRes?.users ?? trainerRes ?? []).map(u => u.id).filter(Boolean)
+    );
 
     if (Array.isArray(memberships)) {
       memberships.forEach(m => {
         const g = groups.find(x => x.id === m.groupid);
         if (!g) return;
-        const allIds = m.userids || [];
-        const trainerIds = trainerIdsByCourse.get(g.courseId) || new Set();
-        g.memberCount = allIds.filter(id => !trainerIds.has(id)).length;
+        g.memberCount = (m.userids || []).filter(id => !trainerIds.has(id)).length;
       });
     }
   } catch (e) {
