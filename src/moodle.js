@@ -19,6 +19,8 @@
  *    numerische Kurs-IDs im id-Feld des Kurs-Pools
  */
 
+import { logInfo, logWarn, logError } from './logger';
+
 /**
  * Flacht verschachtelte Parameter auf Moodle-Format ab:
  * { users: [{username: 'foo'}] } → { 'users[0][username]': 'foo' }
@@ -44,6 +46,14 @@ function flattenParams(obj, prefix = '') {
   return result;
 }
 
+/** Fasst Parameter fürs Protokoll zusammen — nur Mengen, nie Werte. */
+function describeParams(params) {
+  const parts = Object.entries(params || {})
+    .filter(([, v]) => Array.isArray(v))
+    .map(([k, v]) => `${k}: ${v.length}`);
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
 /**
  * Führt einen Moodle REST API-Aufruf durch.
  * Wirft einen Fehler bei HTTP-Fehler oder Moodle-Exception.
@@ -57,26 +67,38 @@ async function callMoodle(baseUrl, token, wsfunction, params = {}) {
     ...flattenParams(params),
   });
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const started = Date.now();
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  } catch (e) {
+    logError('moodle', `${wsfunction} nicht erreichbar`, e);
+    throw e;
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    console.error(`[Moodle] HTTP ${response.status} für ${wsfunction}:`, text);
+    logError('moodle', `${wsfunction} HTTP ${response.status}`, text.slice(0, 300));
     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
 
   const data = await response.json();
-  console.debug(`[Moodle] ${wsfunction} raw response:`, data);
+  // Nur im Dev-Build: die Antworten enthalten Namen, E-Mails und User-IDs
+  if (import.meta.env.DEV) console.debug(`[Moodle] ${wsfunction} raw response:`, data);
 
   if (data && typeof data === 'object' && data.exception) {
-    console.error(`[Moodle] Exception bei ${wsfunction}:`, data);
+    // Moodles Meldung im Wortlaut — sie nennt fast immer die Ursache
+    logError('moodle', `${wsfunction} abgelehnt${describeParams(params)}`, `${data.errorcode || data.exception}: ${data.message}`);
     throw new Error(data.message || `Moodle-Fehler: ${data.exception}`);
   }
 
+  const ms = Date.now() - started;
+  logInfo('moodle', `${wsfunction} ok${describeParams(params)}${ms > 3000 ? ` — langsam, ${Math.round(ms / 1000)} s` : ''}`);
   return data;
 }
 
@@ -172,6 +194,7 @@ export async function enrollInMoodle({
 
   const userIdMap = {};   // username → moodle user id
   const warnings = [];
+  const existingUsernames = new Set(); // Konten, die schon vor diesem Lauf in Moodle waren
   let usersCreated = 0;
 
   // ── Schritt 1a: Bestehende Institut-User laden (Kohorte via E-Mail-Wildcard) ───
@@ -182,19 +205,19 @@ export async function enrollInMoodle({
   report('Bestehende Accounts prüfen…', 10);
   const instClean = (config.institute || '').replace(/\s+/g, '').toLowerCase();
   {
-    let wildcardSucceeded = false;
     try {
       const res = await callMoodle(baseUrl, token, 'core_user_get_users', {
         criteria: [{ key: 'email', value: `%@${instClean}.com` }],
       });
       const users = res?.users ?? (Array.isArray(res) ? res : []);
       users.forEach(u => { if (u.username && u.id) userIdMap[u.username] = u.id; });
-      wildcardSucceeded = true;
     } catch (e) { console.warn('[Moodle] Wildcard-Vorprüfung fehlgeschlagen:', e.message); }
 
-    // Fallback: core_user_get_users_by_field mit exakten Usernamen aus generatedData
-    if (!wildcardSucceeded) {
-      const usernames = generatedData.map(u => u.user?.trim().toLowerCase()).filter(Boolean);
+    // Exakter Abgleich per Username für alle, die das Wildcard nicht gefunden hat —
+    // nötig bei Bestelllisten-Import (Username = echte E-Mail, kein @institut.com)
+    // und als Fallback, wenn der Token core_user_get_users nicht hat.
+    {
+      const usernames = generatedData.map(u => u.user?.trim().toLowerCase()).filter(u => u && !userIdMap[u]);
       const chunkSize = 200;
       for (let i = 0; i < usernames.length; i += chunkSize) {
         try {
@@ -206,8 +229,8 @@ export async function enrollInMoodle({
       }
     }
 
-    const existingCount = Object.keys(userIdMap).length;
-    if (existingCount > 0) warnings.push(`${existingCount} User bereits vorhanden — werden wiederverwendet.`);
+    generatedData.forEach(u => { const n = u.user?.trim().toLowerCase(); if (n && userIdMap[n]) existingUsernames.add(n); });
+    if (existingUsernames.size > 0) warnings.push(`${existingUsernames.size} Konten bestehen bereits — werden wiederverwendet, Passwort bleibt unverändert.`);
   }
 
   // ── Schritt 1b: Nur neue User anlegen ─────────────────────────────────────
@@ -234,7 +257,7 @@ export async function enrollInMoodle({
             try {
               const found = await callMoodle(baseUrl, token, 'core_user_get_users', { criteria: [{ key: 'username', value: user.username }] });
               const match = (found?.users ?? found ?? [])[0];
-              if (match) { userIdMap[match.username] = match.id; }
+              if (match) { userIdMap[match.username] = match.id; existingUsernames.add(match.username); }
               else warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`);
             } catch { warnings.push(`Account ${user.username} konnte weder angelegt noch gefunden werden.`); }
           }
@@ -352,16 +375,19 @@ export async function enrollInMoodle({
     // 100 Einschreibungen × 5 Felder = 500 Parameter — sicher unter max_input_vars
     const chunkSize = 100;
     const failedEnrolments = [];
+    let lastEnrolError = '';
     for (let i = 0; i < enrolments.length; i += chunkSize) {
       const chunk = enrolments.slice(i, i + chunkSize);
       try {
         await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: chunk });
       } catch (bulkErr) {
+        lastEnrolError = bulkErr.message;
+        logWarn('moodle', 'Sammel-Einschreibung abgelehnt — versuche einzeln', bulkErr);
         warnings.push(`Einschreibungs-Chunk fehlgeschlagen (${bulkErr.message}) — versuche einzeln…`);
         for (const enrolment of chunk) {
           let success = false;
           for (let attempt = 1; attempt <= 3 && !success; attempt++) {
-            try { await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: [enrolment] }); success = true; } catch { /* retry */ }
+            try { await callMoodle(baseUrl, token, 'enrol_manual_enrol_users', { enrolments: [enrolment] }); success = true; } catch (e) { lastEnrolError = e.message; }
           }
           if (!success) failedEnrolments.push(enrolment);
         }
@@ -370,7 +396,7 @@ export async function enrollInMoodle({
     if (failedEnrolments.length > 0) {
       const failedUserIds = [...new Set(failedEnrolments.map(e => e.userid))];
       const failedNames = failedUserIds.map(id => Object.keys(userIdMap).find(u => userIdMap[u] === id) ?? `ID ${id}`);
-      throw new Error(`Einschreibung fehlgeschlagen für: ${failedNames.join(', ')}. Bitte Moodle-Berechtigungen und Kurs-IDs prüfen.`);
+      throw new Error(`Moodle meldet: ${lastEnrolError || 'keine Begründung'} — Einschreibung fehlgeschlagen für ${failedNames.length} Konten: ${failedNames.join(', ')}`);
     }
   }
 
@@ -498,7 +524,23 @@ export async function enrollInMoodle({
     cohortMembersAdded: cohortId ? Object.keys(userIdMap).length : 0,
     warnings,
     userIdMap,
+    existingUsernames: [...existingUsernames],
   };
+}
+
+/**
+ * Welche dieser Anmeldenamen gibt es in Moodle schon? (exakter Abgleich)
+ * Wird vor dem Export genutzt, damit Excel/PDF für bestehende Konten kein
+ * neues Passwort zeigen, das nie gesetzt wird.
+ */
+export async function findExistingUsernames(baseUrl, token, usernames) {
+  const found = new Set();
+  const list = [...new Set(usernames.map(u => u?.trim().toLowerCase()).filter(Boolean))];
+  for (let i = 0; i < list.length; i += 200) {
+    const res = await callMoodle(baseUrl, token, 'core_user_get_users_by_field', { field: 'username', values: list.slice(i, i + 200) });
+    if (Array.isArray(res)) res.forEach(u => { if (u.username) found.add(u.username); });
+  }
+  return found;
 }
 
 /**
