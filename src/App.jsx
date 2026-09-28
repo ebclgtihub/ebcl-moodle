@@ -1,12 +1,14 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
-import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers, fetchInstituteUsers } from './moodle';
+import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers, fetchInstituteUsers , findExistingUsernames } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
+import { captureConsole, setSecretProvider, buildLogText, copyToClipboard, entryCount, logInfo, logWarn, logError } from './logger';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
-import * as XLSX from 'xlsx';
+import { buildAccessWorkbook, excelFileName, EXISTING_PW_TEXT } from './excelExport';
+import { parseOrderCsv } from './orderImport';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -31,6 +33,9 @@ import {
 
 // ─── Store ─────────────────────────────────────────────────────────────────────
 const store = new LazyStore('moodle-settings.json', { autoSave: false });
+
+// Diagnose-Protokoll: Warnungen und Fehler der Konsole mitschreiben (einmalig beim Laden)
+captureConsole();
 
 // ─── Theme ─────────────────────────────────────────────────────────────────────
 const LIGHT = {
@@ -156,13 +161,33 @@ const ClassNameRow = ({ row, savedValue, onUpdate, C }) => {
 };
 
 // ─── Passwort-Generator (Moodle-konform) ───────────────────────────────────────
+// Zufall kommt aus crypto.getRandomValues, nicht aus Math.random — die Passwörter
+// gehen als Initialkennwort an Schüler und dürfen nicht vorhersagbar sein.
+const randomInt = max => {
+  // Rejection Sampling: schneidet den Rest oberhalb des größten Vielfachen von
+  // max ab, sonst wären kleine Werte minimal wahrscheinlicher (Modulo-Bias).
+  const limit = Math.floor(2 ** 32 / max) * max;
+  const buf = new Uint32Array(1);
+  let value;
+  do {
+    crypto.getRandomValues(buf);
+    value = buf[0];
+  } while (value >= limit);
+  return value % max;
+};
+
 const generatePassword = () => {
   const U = 'ABCDEFGHJKLMNPQRSTUVWXYZ', L = 'abcdefghjkmnpqrstuvwxyz';
   const D = '23456789', S = '!@#$%&*-=?';
   const pool = U + L + D + S;
-  const r = s => s[Math.floor(Math.random() * s.length)];
-  return [r(U), r(L), r(D), r(S), ...Array.from({ length: 6 }, () => r(pool))]
-    .sort(() => Math.random() - 0.5).join('');
+  const r = s => s[randomInt(s.length)];
+  const chars = [r(U), r(L), r(D), r(S), ...Array.from({ length: 6 }, () => r(pool))];
+  // Fisher-Yates — ein Vergleichs-Sort mit Zufallskomparator mischt nicht gleichverteilt
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 };
 
 // ─── QR-Code Cache (wird einmalig generiert und wiederverwendet) ───────────────
@@ -184,6 +209,9 @@ const App = () => {
   const [activeModal, setActiveModal] = useState(null);
   const [classMatrix, setClassMatrix] = useState({});
   const [generatedData, setGeneratedData] = useState([]);
+  // Bestellliste (Marktplatz-CSV): orderPreview = geprüft, noch nicht übernommen; orderImport = aktiv
+  const [orderPreview, setOrderPreview] = useState(null);
+  const [orderImport, setOrderImport] = useState(null);
   const [isGenerated, setIsGenerated] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
@@ -255,6 +283,9 @@ const App = () => {
 
   // ─── Toast ────────────────────────────────────────────────────────────────
   const addToast = useCallback((message, type = 'info', duration = 4000) => {
+    // Jede sichtbare Fehlermeldung landet auch im Diagnose-Protokoll
+    if (type === 'error') logError('hinweis', message);
+    else if (type === 'warning') logWarn('hinweis', message);
     const id = ++toastIdRef.current;
     setToasts(prev => [...prev, { id, message, type }]);
     if (duration > 0) setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
@@ -331,6 +362,20 @@ const App = () => {
     } catch (e) { addToast(`Update fehlgeschlagen: ${e.message}`, 'error'); setIsInstalling(false); }
   }, [pendingUpdate, addToast]);
 
+  // ─── Diagnose-Protokoll: aktuelle Geheimwerte fürs Maskieren ────────────
+  const diagConfigRef = useRef(config);
+  diagConfigRef.current = config;
+  useEffect(() => {
+    setSecretProvider(() => {
+      const c = diagConfigRef.current;
+      return {
+        moodleToken: c.moodleToken, zohoClientId: c.zohoClientId, zohoClientSecret: c.zohoClientSecret,
+        zohoRefreshToken: c.zohoRefreshToken, studentPwd: c.studentPwd, trainerPwd: c.trainerPwd,
+        courseApiUrl: c.courseApiUrl, sharepointUrl: c.sharepointUrl,
+      };
+    });
+  }, []);
+
   // ─── Store: Laden ─────────────────────────────────────────────────────────
   useEffect(() => {
     const load = async () => {
@@ -405,11 +450,12 @@ const App = () => {
           }
           return p;
         });
+        // Erst nach erfolgreichem Laden freigeben — sonst würde der Auto-Save
+        // die gespeicherten Werte mit den leeren Standardwerten überschreiben.
+        setIsStoreLoaded(true);
       } catch (e) {
         console.error('Store laden:', e);
-        addToast('Einstellungen konnten nicht geladen werden.', 'error');
-      } finally {
-        setIsStoreLoaded(true);
+        addToast('Einstellungen konnten nicht geladen werden — Änderungen werden in dieser Sitzung nicht gespeichert.', 'error');
       }
     };
     load();
@@ -515,7 +561,6 @@ const App = () => {
         clientSecret: config.zohoClientSecret,
         code: zohoGrantCode.trim(),
       });
-      console.log('[Zoho] Token-Exchange Response:', rawText);
       let data;
       try { data = JSON.parse(rawText); } catch { throw new Error(`Ungültige Antwort: ${rawText}`); }
       if (!data.refresh_token) {
@@ -532,6 +577,39 @@ const App = () => {
       setIsExchangingZohoToken(false);
     }
   }, [zohoGrantCode, config.zohoClientId, config.zohoClientSecret, addToast]);
+
+  // ─── Diagnose-Protokoll: Export ──────────────────────────────────────────
+  const logHeader = useCallback(() => ({
+    'App-Version': appVersion || 'unbekannt',
+    'System': typeof navigator !== 'undefined' ? navigator.userAgent : 'unbekannt',
+    'Moodle': (config.moodleUrl || '').replace(/^https?:\/\//, '').replace(/\/+$/, '') || 'nicht gesetzt',
+    'Moodle-Token': config.moodleToken ? 'gesetzt' : 'fehlt',
+    'Kursliste': config.moodleBetaEnabled ? 'direkt aus Moodle' : (config.courseApiUrl ? 'Power Automate' : 'nur Cache'),
+    'Zoho': zohoEnabled ? 'aktiv' : 'nicht eingerichtet',
+    'Modus': enrolMode,
+  }), [appVersion, config.moodleUrl, config.moodleToken, config.moodleBetaEnabled, config.courseApiUrl, zohoEnabled, enrolMode]);
+
+  const handleCopyLog = useCallback(async () => {
+    const ok = await copyToClipboard(buildLogText(logHeader()));
+    addToast(ok ? 'Protokoll kopiert — in eine Mail einfügen und an den Support schicken.' : 'Kopieren fehlgeschlagen — bitte „Speichern" nutzen.', ok ? 'success' : 'error');
+  }, [logHeader, addToast]);
+
+  const handleSaveLog = useCallback(async () => {
+    const name = 'diagnose-protokoll.json';
+    try {
+      const file = new LazyStore(name, { autoSave: false });
+      await file.set('erstellt', new Date().toISOString());
+      await file.set('protokoll', buildLogText(logHeader()).split('\n'));
+      await file.save();
+      const { appDataDir, join } = await import('@tauri-apps/api/path');
+      const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+      await revealItemInDir(await join(await appDataDir(), name));
+      addToast('Protokoll gespeichert — die Datei ist im Explorer bzw. Finder markiert.', 'success');
+    } catch (e) {
+      logError('diagnose', 'Speichern fehlgeschlagen', e);
+      addToast('Speichern fehlgeschlagen — bitte „Kopieren" nutzen.', 'error');
+    }
+  }, [logHeader, addToast]);
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
   const fetchCoursePool = useCallback(async () => {
@@ -567,8 +645,12 @@ const App = () => {
         });
         store.set('coursePool', normalized).then(() => store.save()).catch(() => {});
       }
+      logInfo('kursliste', `${normalized.length} Kurse aus Power Automate geladen`);
       addToast(`${normalized.length} Kurse geladen.`, 'success', 2500);
-    } catch { addToast('Verbindung zum Kurs-Pool fehlgeschlagen — verwende Cache.', 'error'); }
+    } catch (e) {
+      logError('kursliste', 'Power Automate nicht erreichbar — Cache wird verwendet', e);
+      addToast('Verbindung zum Kurs-Pool fehlgeschlagen — verwende Cache.', 'error');
+    }
     finally { setIsLoadingPool(false); }
   }, [addToast]);
   useEffect(() => { fetchCoursePool(); }, [fetchCoursePool]);
@@ -713,11 +795,16 @@ const App = () => {
       const prefix = config.institute?.trim() + '-';
       return row.groupName.startsWith(prefix) ? row.groupName.slice(prefix.length) : row.groupName;
     }
+    // Bestellliste: Klassenname aus dem Import (nicht in classNames, das dauerhaft gespeichert wird)
+    if (orderImport && !row.isExisting) {
+      const g = orderImport.classes[row.id - 1]?.grade;
+      if (g) return g;
+    }
     const n = config.classNames?.[row.id - 1]?.trim();
     if (n) return n;
     const effectiveId = row.id + classGroupOffsetRef.current;
     return `Klasse-${String(effectiveId).padStart(2, '0')}`;
-  }, [config.classNames, config.institute]);
+  }, [config.classNames, config.institute, orderImport]);
 
   // ─── Handler ──────────────────────────────────────────────────────────────
   const handleInput = useCallback(e => {
@@ -832,6 +919,51 @@ const App = () => {
     }, ...prev]);
   }, [config.institute, generatedData]);
 
+  // ─── Bestellliste importieren ─────────────────────────────────────────────
+  const handleOrderFile = useCallback(async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // gleiche Datei erneut wählbar
+    if (!file) return;
+    try {
+      const parsed = parseOrderCsv(await file.text());
+      if (!parsed.persons.length) return addToast('Die Bestellliste enthält keine übernehmbaren Personen.', 'error');
+      setOrderPreview({ ...parsed, fileName: file.name });
+      logInfo('bestellliste', 'Bestellliste geprüft', `${parsed.persons.length} Personen, ${parsed.problems.length} Probleme`);
+    } catch (err) {
+      addToast(err.message, 'error', 8000);
+      logWarn('bestellliste', 'Bestellliste abgelehnt', err.message);
+    }
+  }, [addToast]);
+
+  const applyOrderImport = useCallback(() => {
+    if (!orderPreview) return;
+    // Klassenstruktur aus der Bestellung: eine Zeile pro Klasse, Größe = Anzahl Schüler:innen
+    const classCustomSizes = {};
+    orderPreview.classes.forEach((c, i) => { classCustomSizes[i + 1] = c.count; });
+    setConfig(p => ({
+      ...p,
+      classCounts: { 0: orderPreview.classes.length, 1: 0, 2: 0, 3: 0 },
+      classCustomSizes, classNames: {},
+      trainerCount: orderPreview.teachers,
+    }));
+    // Zeilen-IDs werden neu vergeben — alte Kurszuweisungen würden sonst an den neuen Klassen hängen
+    setClassMatrix({});
+    setInvalidClassIds(new Set());
+    setEnrolMode('new');
+    setOrderImport(orderPreview);
+    setOrderPreview(null);
+    setIsGenerated(false);
+    addToast(`Bestellliste übernommen: ${orderPreview.persons.length} Personen in ${orderPreview.classes.length} Klasse(n). Jetzt Kurse zuweisen.`, 'success', 6000);
+  }, [orderPreview, addToast]);
+
+  const clearOrderImport = useCallback(() => {
+    setOrderImport(null);
+    setConfig(p => ({ ...p, classCounts: { ...DEFAULT_CONFIG.classCounts }, classCustomSizes: {}, classNames: {} }));
+    setClassMatrix({});
+    setInvalidClassIds(new Set());
+    setIsGenerated(false);
+  }, []);
+
   // ─── Generierung ──────────────────────────────────────────────────────────
   const generateList = useCallback(async (confirmed = false) => {
     if (!config.institute?.trim()) return addToast('Bitte Institutsnamen eingeben.', 'error');
@@ -852,6 +984,43 @@ const App = () => {
     });
     if (badIds.size) { setInvalidClassIds(badIds); return addToast(`${badIds.size} Klasse(n) ohne Kurszuweisung — rot markiert.`, 'error'); }
     setInvalidClassIds(new Set());
+
+    // ── Bestellliste: Klarnamen, Anmeldename = E-Mail, keine Nummerierung ────
+    if (orderImport) {
+      if (enrolMode !== 'new') return addToast('Die Bestellliste funktioniert nur im Modus „Neu anlegen“.', 'error');
+      classGroupOffsetRef.current = 0;
+      const pw = isT => (config.autoPassword ? generatePassword() : (isT ? config.trainerPwd : config.studentPwd));
+      const person = (p, extra) => ({
+        isT: p.isT, first: p.first, last: p.last, user: p.email, mail: p.email,
+        displayName: `${p.first} ${p.last}`, pw: pw(p.isT), ...extra,
+      });
+      const data = orderImport.persons.filter(p => p.isT).map(p => person(p, { cNum: 'ALL', courses: activeMatrixCourses }));
+      effectiveClassRows.forEach(r => {
+        const grade = getClassLabel(r);
+        const selIds = (classMatrix[r.id] || []).map(String);
+        const selCourses = courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
+        orderImport.persons.filter(p => !p.isT && p.grade === grade).forEach(p => data.push(person(p, {
+          cNum: String(r.id).padStart(2, '0'), cLabel: `${config.institute}-${grade}`, courses: selCourses,
+        })));
+      });
+      const missing = orderImport.persons.length - data.length;
+      if (missing > 0) {
+        return addToast(`${missing} Person(en) aus der Bestellliste sind keiner Klasse zugeordnet — wurde die Klassenstruktur geändert? Bestellliste entfernen und neu importieren.`, 'error', 10000);
+      }
+      // Bestehende Konten vorab erkennen: Excel/PDF zeigen für sie kein (nie gesetztes) neues Passwort
+      if (config.moodleUrl?.trim() && config.moodleToken?.trim()) {
+        try {
+          const existing = await findExistingUsernames(config.moodleUrl, config.moodleToken, data.map(d => d.user));
+          data.forEach(d => { if (existing.has(d.user)) d.existing = true; });
+          if (existing.size) addToast(`${existing.size} Konto/Konten bestehen bereits — Passwort bleibt unverändert.`, 'info', 6000);
+        } catch (e) {
+          addToast(`Konnte bestehende Konten nicht prüfen (${e.message}) — wird bei der Einschreibung nachgeholt.`, 'warning', 8000);
+        }
+      }
+      setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
+      addToast(`${data.length} Accounts aus der Bestellliste erstellt.`, 'success');
+      return;
+    }
 
     // ── Aktualisieren / Kombiniert-Modus mit geladenen Moodle-Gruppen ─────────
     if ((enrolMode === 'update' || enrolMode === 'both') && moodleGroups.length > 0) {
@@ -883,7 +1052,8 @@ const App = () => {
           for (const member of members) {
             if (!member.username || usernameSet.has(member.username)) continue;
             usernameSet.add(member.username);
-            const isTrainer = member.username.includes(`${instClean}-trainer-`);
+            // Trainer: altes Namensmuster oder Rolle 4 (Bestelllisten-Lehrkräfte heißen wie ihre E-Mail)
+            const isTrainer = member.username.includes(`${instClean}-trainer-`) || (member.roles || []).some(r => r.roleid === 4);
             data.push({
               cNum: isTrainer ? 'ALL' : String(r.id).padStart(2, '0'),
               cLabel: isTrainer ? undefined : classLabel,
@@ -891,6 +1061,7 @@ const App = () => {
               first: member.firstname || (isTrainer ? 'Trainer' : 'Schüler'),
               last: member.lastname || config.institute,
               user: member.username,
+              existing: true, // aus Moodle geladen — Passwort wird nicht geändert
               mail: member.email || `${member.username}@${instClean}.com`,
               pw: isTrainer ? (config.autoPassword ? generatePassword() : config.trainerPwd) : (config.autoPassword ? generatePassword() : config.studentPwd),
               courses: isTrainer ? activeMatrixCourses : selCourses,
@@ -910,7 +1081,7 @@ const App = () => {
           for (const u of allUsers) {
             if (!u.username || !u.username.includes(`${instClean}-trainer-`) || usernameSet.has(u.username)) continue;
             usernameSet.add(u.username);
-            data.push({ cNum: 'ALL', isT: true, first: u.firstname || 'Trainer', last: u.lastname || config.institute, user: u.username, mail: u.email || `${u.username}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
+            data.push({ cNum: 'ALL', isT: true, existing: true, first: u.firstname || 'Trainer', last: u.lastname || config.institute, user: u.username, mail: u.email || `${u.username}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.trainerPwd, courses: activeMatrixCourses });
           }
         } catch { /* nicht-kritisch — Trainer werden ggf. über trainerCount abgedeckt */ }
       }
@@ -1066,7 +1237,7 @@ const App = () => {
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
     addToast(`${data.length} Accounts generiert.`, 'success');
-  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, allMoodleCourses, getClassLabel, addToast, unusualWarnings, enrolMode, selectedUpdateClassIds, moodleGroups, selectedMoodleGroupIds]); // eslint-disable-line
+  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, allMoodleCourses, getClassLabel, addToast, unusualWarnings, enrolMode, selectedUpdateClassIds, moodleGroups, selectedMoodleGroupIds, orderImport]); // eslint-disable-line
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
   const buildCsvBlob = useCallback(() => {
@@ -1098,104 +1269,35 @@ const App = () => {
   }, [buildCsvBlob, config.institute, addToast, addExportEntry]);
 
   // ─── Excel ────────────────────────────────────────────────────────────────
-  const buildExcelBlob = useCallback((dataOverride = null) => {
+  const buildExcelBlob = useCallback(async (dataOverride = null) => {
     const data = dataOverride ?? generatedData;
     if (!data.length) return null;
-    const wb = XLSX.utils.book_new();
-    const periodStr = `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`;
-    const trainers = data.filter(d => d.isT);
+    const toAccount = d => ({ user: d.user, pw: d.pw, name: d.displayName || '', existing: !!d.existing, courses: d.courses || [] });
     const classIds = [...new Set(data.filter(d => !d.isT).map(d => d.cNum))].sort();
-    // Hyperlink zu einer bereits befüllten Zelle hinzufügen
-    const addLink = (ws, r, c, url) => {
-      if (!url) return;
-      const ref = XLSX.utils.encode_cell({ r, c });
-      if (ws[ref]) ws[ref].l = { Target: url };
-    };
-
-    // ─── Sheet 1: Übersicht ───
-    const loginUrl = 'https://world.ebcl.eu/';
-    const overviewRows = [
-      ['EBCL Zugangsdaten – Übersicht'],
-      ['Institut:', config.institute],
-      ['Datum:', new Date().toLocaleDateString('de-DE')],
-      ['Freischaltzeitraum:', periodStr],
-      ['Gesamt-Accounts:', data.length],
-      ['Zugang:', loginUrl],
-      [],
-      ['Gruppe', 'Typ', 'Anzahl Accounts', 'Kurse'],
-    ];
-    if (trainers.length) {
-      overviewRows.push(['Trainer', 'Trainer', trainers.length, activeMatrixCourses.map(c => c.label).join(', ')]);
-    }
-    classIds.forEach(id => {
-      const students = data.filter(d => d.cNum === id);
+    const classes = classIds.map(id => {
+      const students = data.filter(d => !d.isT && d.cNum === id);
       const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
-      const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
-      overviewRows.push([classLabel, 'Schüler', students.length, students[0]?.courses.map(c => c.label).join(', ') || '']);
+      return { label: row ? getClassLabel(row) : `Klasse-${id}`, accounts: students.map(toAccount) };
     });
-    const wsOverview = XLSX.utils.aoa_to_sheet(overviewRows);
-    addLink(wsOverview, 5, 1, loginUrl); // Zeile "Zugang:" → URL klickbar
-    wsOverview['!cols'] = [{ wch: 25 }, { wch: 30 }, { wch: 16 }, { wch: 50 }];
-    XLSX.utils.book_append_sheet(wb, wsOverview, 'Übersicht');
-
-    // Hilfsfunktion: Union aller Kurse einer Gruppe (nach ID, Reihenfolge erhalten)
-    const getUniqueCoursesXlsx = (accounts) => {
-      const seen = new Set();
-      const result = [];
-      accounts.forEach(a => a.courses.forEach(c => {
-        if (!seen.has(String(c.id))) { seen.add(String(c.id)); result.push(c); }
-      }));
-      return result;
-    };
-
-    // Hilfsfunktion: Sheet aus Accounts bauen (Trainer + Klassen gleich strukturiert)
-    // courses = Spalten-Definition; Kurs-Zuordnung per ID (nicht per Position)
-    const buildAccountSheet = (accounts, courses) => {
-      const header = ['Name', 'Username', 'Passwort', ...courses.map((_, i) => `Kurs ${i + 1}`)];
-      const dataRows = accounts.map(a => [
-        '', a.user, a.pw,
-        ...courses.map(cc => a.courses.find(c => String(c.id) === String(cc.id))?.label || ''),
-      ]);
-      const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
-      accounts.forEach((a, ri) => {
-        courses.forEach((cc, ci) => {
-          const c = a.courses.find(c => String(c.id) === String(cc.id));
-          if (c?.url) addLink(ws, ri + 1, 3 + ci, c.url);
-        });
-      });
-      ws['!cols'] = [{ wch: 20 }, { wch: 32 }, { wch: 16 }, ...courses.map(() => ({ wch: 22 }))];
-      return ws;
-    };
-
-    // ─── Sheet: Trainer ───
-    if (trainers.length) {
-      const wsT = buildAccountSheet(trainers, getUniqueCoursesXlsx(trainers));
-      XLSX.utils.book_append_sheet(wb, wsT, 'Trainer');
-    }
-
-    // ─── Sheet per class ───
-    classIds.forEach(id => {
-      const students = data.filter(d => d.cNum === id);
-      const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
-      const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
-      const courses = getUniqueCoursesXlsx(students);
-      const ws = buildAccountSheet(students, courses);
-      const sheetName = classLabel.replace(/[\\\/\?\*\[\]:]/g, '').substring(0, 31);
-      XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    const buffer = await buildAccessWorkbook({
+      institute: config.institute,
+      dateStr: new Date().toLocaleDateString('de-DE'),
+      periodStr: `${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`,
+      trainers: data.filter(d => d.isT).map(toAccount),
+      classes,
+      personal: data.some(d => d.displayName),
     });
-
-    const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    return new Blob([new Uint8Array(buffer)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  }, [generatedData, config, activeMatrixCourses, classRows, getClassLabel, endDateFormatted]);
+    return new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  }, [generatedData, config, classRows, getClassLabel, endDateFormatted]);
 
   const downloadExcel = useCallback(async ({ returnBlob = false, dataOverride = null } = {}) => {
-    const blob = buildExcelBlob(dataOverride);
+    const blob = await buildExcelBlob(dataOverride);
     if (!blob) return returnBlob ? null : undefined;
     if (returnBlob) return blob;
 
     setIsExportingExcel(true);
     try {
-      const fname = `EBCL-Zugangsdaten-${config.institute.replace(/\s+/g, '_')}-${new Date().toISOString().split('T')[0]}.xlsx`;
+      const fname = excelFileName(config.institute, config.enrolDate);
       // WebKit (Tauri/macOS) behandelt binary Blob-URLs als Navigation statt Download —
       // über FileReader zu Data-URL konvertieren, damit der Download korrekt ausgelöst wird.
       await new Promise((resolve, reject) => {
@@ -1389,7 +1491,7 @@ const App = () => {
         renderHeader('Zugangsdaten: Trainer', `ANZAHL: ${trainers.length}`);
         autoTable(doc, {
           head: [['Name (fakultativ)', 'Username', 'Passwort', ...trainerCourses.map((_, i) => `Kurs ${i + 1}`)]],
-          body: trainers.map(t => ['', t.user, t.pw, ...courseRow(t, trainerCourses)]),
+          body: trainers.map(t => [t.displayName || '', t.user, t.existing ? EXISTING_PW_TEXT : t.pw, ...courseRow(t, trainerCourses)]),
           ...tOpts(trainerCourses, `Trainer — ${config.institute}`),
           didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; }
         });
@@ -1405,7 +1507,7 @@ const App = () => {
 
         autoTable(doc, {
           head: [['Name (fakultativ)', 'Username', 'Passwort', ...classCourses.map((_, i) => `Kurs ${i + 1}`)]],
-          body: students.map(s => ['', s.user, s.pw, ...courseRow(s, classCourses)]),
+          body: students.map(s => [s.displayName || '', s.user, s.existing ? EXISTING_PW_TEXT : s.pw, ...courseRow(s, classCourses)]),
           ...tOpts(classCourses, `${classLabel} — ${config.institute}`)
         });
       });
@@ -1448,7 +1550,7 @@ const App = () => {
       const folderName = `${dateStr}_${instClean}`;
       const csvName = `EBCL-Moodle-Upload-${instClean}-${dateStr}.csv`;
       const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
-      const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
+      const xlsxName = excelFileName(config.institute, config.enrolDate);
       const csvBlob = buildCsvBlob();
       const [pdfBlob, xlsxBlob] = await Promise.all([downloadPDF({ returnBlob: true }), downloadExcel({ returnBlob: true })]);
       if (!csvBlob || !pdfBlob || !xlsxBlob) return addToast('Daten fehlen für Upload.', 'error');
@@ -1571,6 +1673,7 @@ const App = () => {
     const progress = (label, pct) => setMoodleProgress({ label, pct, done: false, error: false });
     setIsMoodleEnrolling(true);
     setMoodleProgress({ label: 'Verbindung aufbauen…', pct: 2, done: false, error: false });
+    logInfo('ablauf', 'Moodle-Einschreibung gestartet', { institut: config.institute, modus: enrolMode, konten: generatedData.length, kurse: activeMatrixCourses.length, beginn: config.enrolDate, tage: config.enrolPeriod });
 
     let result;
     try {
@@ -1593,14 +1696,19 @@ const App = () => {
       return; // Abbruch — kein SharePoint, kein Zoho
     }
 
-    result.warnings.forEach(w => addToast(w, 'info'));
+    result.warnings.forEach(w => { addToast(w, 'info'); logWarn('moodle', w); });
     addExportEntry('Moodle', 'Moodle-Einschreibung');
+    logInfo('ablauf', 'Moodle-Einschreibung abgeschlossen', `${Object.keys(result.userIdMap).length} Konten`);
 
     // ── Schritt 6: Nur tatsächlich eingeschriebene User behalten ──────────
     // Basis-Filter: nur User die in Moodle erstellt/gefunden wurden (in userIdMap).
     // User die weder angelegt noch gefunden werden konnten stehen nicht im PDF.
     const enrolledUsernames = new Set(Object.keys(result.userIdMap));
-    const moodleData = generatedData.filter(u => enrolledUsernames.has(u.user?.trim().toLowerCase()));
+    const existingSet = new Set(result.existingUsernames || []);
+    const moodleData = generatedData
+      .filter(u => enrolledUsernames.has(u.user?.trim().toLowerCase()))
+      // Bestehende Konten behalten ihr Passwort — in Excel/PDF nicht das neu generierte zeigen
+      .map(u => (existingSet.has(u.user?.trim().toLowerCase()) ? { ...u, existing: true } : u));
 
     // ── Schritt 7: Vollständige Kurseinschreibungen laden ─────────────────
     // Mit Anreicherung: User mit 0 echten Moodle-Kursen werden gefiltert.
@@ -1660,13 +1768,13 @@ const App = () => {
         ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
         'Accounts', '--------',
         ...exportData.map(u =>
-          `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
+          `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.existing ? EXISTING_PW_TEXT : u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
         ),
       ];
       const txtBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
       const txtName = `EBCL-Moodle-Import-${instClean}-${dateStr}.txt`;
       const pdfName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.pdf`;
-      const xlsxName = `EBCL-Zugangsdaten-${instClean}-${dateStr}.xlsx`;
+      const xlsxName = excelFileName(config.institute, config.enrolDate);
       try {
         const pdfBlob = await downloadPDF({ returnBlob: true, dataOverride: exportData });
         const xlsxBlob = await downloadExcel({ returnBlob: true, dataOverride: exportData });
@@ -1842,7 +1950,7 @@ const App = () => {
                   ['01', C.accent1, 'Institut wählen & Klassen laden',  'Institutsname eingeben, dann "Klassen laden" — die App fragt Moodle ab und listet alle vorhandenen Klassen des Instituts mit Mitgliederzahl.'],
                   ['02', C.accent1, 'Klassen auswählen',                'Checkboxen aktivieren welche Klassen aktualisiert werden sollen. Abgewählte Klassen erscheinen nicht in der Matrix.'],
                   ['03', C.accent1, 'Matrix prüfen',                    'Bereits eingeschriebene Kurse sind blau mit RefreshCw-Symbol vorbelegt und können nicht abgewählt werden. Weitere Kurse können ergänzt werden.'],
-                  ['04', C.accent1, 'Generieren & Einschreiben',        '⌘G — lädt die echten Moodle-Mitglieder und schreibt sie erneut ein (Zeitraum & Passwort werden aktualisiert).'],
+                  ['04', C.accent1, 'Generieren & Einschreiben',        '⌘G — lädt die echten Moodle-Mitglieder und schreibt sie erneut ein (Zeitraum & Kurse werden aktualisiert, Passwörter bleiben).'],
                 ].map(([n, col, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
@@ -1952,7 +2060,7 @@ const App = () => {
               </HSection>
               <HSection icon={<TableIcon size={14} />} title="Excel-Export">
                 <Info>Identische Inhalte wie die CSV, aber im XLSX-Format mit Tabellenformatierung — übersichtlicher für manuelle Bearbeitung.</Info>
-                <Row label="Dateiname" desc="EBCL-Zugangsdaten-{Institut}-{Datum}.xlsx" />
+                <Row label="Dateiname" desc="Zugangsdaten-{Institut}_{Jahr}.xlsx" />
               </HSection>
               <HSection icon={<Upload size={14} />} title="SharePoint-Upload">
                 <Info>Lädt CSV, PDF und Excel gleichzeitig in einen neuen SharePoint-Ordner hoch (via Power Automate Flow).</Info>
@@ -1973,7 +2081,7 @@ const App = () => {
               <HSection icon={<GraduationCap size={14} />} title="Direkte Moodle-Einschreibung">
                 <Info>Accounts werden direkt über die Moodle REST API angelegt und eingeschrieben — kein CSV-Umweg nötig. Funktioniert in allen drei Modi (Neu anlegen, Aktualisieren, Beides). Das Ergebnis wird danach automatisch zu SharePoint hochgeladen.</Info>
                 <Row label="Neu anlegen" desc="Erstellt neue Accounts fortlaufend nach den höchsten bestehenden Nummern. Schüler, Trainer und Klassen werden automatisch weiternummeriert." />
-                <Row label="Aktualisieren" desc="Lädt echte Moodle-Mitglieder der ausgewählten Gruppen und schreibt sie neu ein — Zeitraum und Passwort werden aktualisiert. Neue Accounts werden dabei nicht erstellt." />
+                <Row label="Aktualisieren" desc="Lädt echte Moodle-Mitglieder der ausgewählten Gruppen und schreibt sie neu ein — Zeitraum und Kurse werden aktualisiert, Passwörter bleiben unverändert. Neue Accounts werden dabei nicht erstellt." />
                 <Row label="Aktualisieren & Neu anlegen" desc="Kombinierter Durchlauf: bestehende Gruppen werden aktualisiert, neue Accounts für neue Klassen werden erstellt und eingeschrieben." />
               </HSection>
               <HSection icon={<Settings size={14} />} title="Einrichtung">
@@ -2026,7 +2134,7 @@ const App = () => {
                   ['1', 'Klassen laden',    'Die App lädt alle Gruppen des Instituts kursübergreifend aus Moodle (core_group_get_course_groups).'],
                   ['2', 'Mitglieder laden', 'Für jede ausgewählte Gruppe werden die echten Moodle-Mitglieder geladen (core_enrol_get_enrolled_users). Trainer werden automatisch erkannt.'],
                   ['3', 'Kurse kombinieren','Bereits eingeschriebene Kurse (gesperrt) und manuell ergänzte Kurse werden zusammengeführt.'],
-                  ['4', 'Einschreiben',     'Alle Mitglieder werden erneut in alle ihre Kurse eingeschrieben — Zeitraum und Passwort werden dabei aktualisiert.'],
+                  ['4', 'Einschreiben',     'Alle Mitglieder werden erneut in alle ihre Kurse eingeschrieben — Zeitraum wird dabei aktualisiert, Passwörter bleiben unverändert.'],
                 ].map(([n, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: C.accent1, backgroundColor: C.accent1 + '18', borderColor: C.accent1 + '30' }} className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
@@ -2499,6 +2607,23 @@ const App = () => {
               </div>
             </div>
 
+            <div className="mt-4">
+              <h4 style={{ color: C.muted }} className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 mb-1">
+                <ClipboardList size={14} /> Diagnose-Protokoll
+              </h4>
+              <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Hält fest, was die App mit Moodle, Zoho und Power Automate macht — mit den genauen Fehlermeldungen. Zugangsdaten, Passwörter und E-Mail-Adressen werden vorher entfernt. Bei Problemen kopieren oder speichern und an den Support schicken.</p>
+              <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm flex items-center justify-between gap-2">
+                <p style={{ color: C.muted }} className="text-[9px]">{entryCount()} Einträge in dieser Sitzung</p>
+                <div className="flex items-center gap-2">
+                  <button onClick={handleCopyLog} style={{ borderColor: C.border, color: C.text }} className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5">
+                    <ClipboardList size={11} /> Kopieren
+                  </button>
+                  <button onClick={handleSaveLog} style={{ borderColor: C.border, color: C.text }} className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5">
+                    <FileDown size={11} /> Speichern
+                  </button>
+                </div>
+              </div>
+            </div>
           </>}
 
           {/* ── Anpassen ──────────────────────────────────────────── */}
@@ -3022,6 +3147,42 @@ const App = () => {
       {activeModal === 'institutePreview' && renderInstitutePreviewModal()}
       {showZohoTokenModal && renderZohoTokenModal()}
       {activeModal === 'dataPreview' && renderDataPreviewModal()}
+      {orderPreview && (
+        <ModalShell C={C} maxW="max-w-2xl" zIndex={120}>
+          <div className="p-6 bg-slate-800 border-b flex justify-between items-center shrink-0">
+            <div className="flex items-center gap-3 text-white">
+              <div style={{ backgroundColor: C.accent2 }} className="p-2.5 rounded-xl"><Upload size={20} /></div>
+              <div>
+                <h3 className="text-base font-bold uppercase tracking-tight leading-none">Bestellliste prüfen</h3>
+                <p className="text-[10px] text-slate-400 mt-0.5">{orderPreview.fileName}{orderPreview.skz.length ? ` · Schulkennzahl ${orderPreview.skz.join(', ')}` : ''}</p>
+              </div>
+            </div>
+            <button onClick={() => setOrderPreview(null)} className="p-2 hover:bg-white/10 rounded-full text-slate-400 transition-colors"><X size={24} /></button>
+          </div>
+          <div className="flex-1 overflow-auto bg-white p-6 space-y-4 text-[11px] text-slate-700">
+            <table className="w-full border-collapse">
+              <thead className="text-slate-500 uppercase tracking-widest text-[9px]"><tr><th className="text-left py-1">Gruppe</th><th className="text-right py-1">Personen</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                <tr><td className="py-1.5">Trainer (LehrerIn)</td><td className="text-right font-semibold">{orderPreview.teachers}</td></tr>
+                {orderPreview.classes.map(c => <tr key={c.grade}><td className="py-1.5">Klasse {c.grade}</td><td className="text-right font-semibold">{c.count}</td></tr>)}
+              </tbody>
+            </table>
+            {orderPreview.problems.length > 0 && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3">
+                <p className="font-bold text-amber-800 mb-1.5 flex items-center gap-1.5"><AlertTriangle size={14} /> {orderPreview.problems.length} Zeile(n) werden nicht angelegt — bitte mit der Schule klären</p>
+                <ul className="space-y-0.5 text-amber-900">
+                  {orderPreview.problems.map(pr => <li key={pr.line}>Zeile {pr.line}: {pr.name || '—'} ({pr.email || 'ohne E-Mail'}) — {pr.reason}</li>)}
+                </ul>
+              </div>
+            )}
+            <p className="text-slate-500">Anmeldename und E-Mail in Moodle = E-Mail aus der Bestellung. Konten, die es schon gibt, werden übernommen und behalten ihr Passwort. Die bPK wird nicht gespeichert.</p>
+          </div>
+          <div className="p-4 border-t bg-slate-50 flex justify-end gap-2 shrink-0">
+            <button onClick={() => setOrderPreview(null)} className="px-4 py-2 text-[11px] font-bold uppercase rounded-xl border text-slate-500">Abbrechen</button>
+            <button onClick={applyOrderImport} style={{ backgroundColor: C.accent2 }} className="px-4 py-2 text-[11px] font-bold uppercase rounded-xl text-white">{orderPreview.persons.length} Personen übernehmen</button>
+          </div>
+        </ModalShell>
+      )}
 
       {/* MOODLE ERGEBNIS POPUP */}
       {moodleResult && (
@@ -3390,13 +3551,32 @@ const App = () => {
                       </div>
                     </div>
                     {enrolMode === 'update' && (
-                      <p style={{ color: C.accent1 }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aus Moodle laden, auswählen und Zeitraum & Passwort aktualisieren.</p>
+                      <p style={{ color: C.accent1 }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aus Moodle laden, auswählen und Zeitraum & Kurse aktualisieren. Passwörter bleiben unverändert.</p>
                     )}
                     {enrolMode === 'new' && (
                       <p style={{ color: C.accent2 }} className="text-[8px] mt-1 ml-1 leading-snug">Schüler/Trainer/Klassen werden fortlaufend nach bestehenden Einträgen nummeriert.</p>
                     )}
                     {enrolMode === 'both' && (
                       <p style={{ color: C.main }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aktualisieren + neue Klassen hinzufügen — in einem Durchlauf.</p>
+                    )}
+                  </div>
+                  {/* Bestellliste vom Marktplatz */}
+                  <div>
+                    <label style={{ color: C.muted }} className="text-[8px] font-semibold uppercase block mb-1.5 ml-1">Bestellliste (Marktplatz)</label>
+                    {orderImport ? (
+                      <div style={{ backgroundColor: C.card, borderColor: C.accent2 }} className="p-2.5 rounded-xl border flex items-center gap-2">
+                        <CheckCircle2 size={14} style={{ color: C.accent2 }} className="shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p style={{ color: C.text }} className="text-[10px] font-semibold truncate">{orderImport.fileName}</p>
+                          <p style={{ color: C.muted }} className="text-[9px]">{orderImport.persons.length} Personen · {orderImport.classes.length} Klasse(n) · Anmeldename = E-Mail</p>
+                        </div>
+                        <button onClick={clearOrderImport} title="Bestellliste entfernen" style={{ color: C.muted }} className="p-1 hover:bg-black/5 rounded-lg"><X size={14} /></button>
+                      </div>
+                    ) : (
+                      <label style={{ borderColor: C.border, color: C.muted }} className="w-full py-2 text-[10px] font-bold uppercase tracking-wide border border-dashed rounded-xl flex items-center justify-center gap-1.5 cursor-pointer hover:bg-black/5 transition-all">
+                        <Upload size={12} /> Bestellliste importieren (.csv)
+                        <input type="file" accept=".csv,text/csv" onChange={handleOrderFile} className="hidden" />
+                      </label>
                     )}
                   </div>
                 </div>
@@ -3692,7 +3872,7 @@ const App = () => {
                   }).map((c, rowIdx, visibleRows) => {
                     const isInvalid = invalidClassIds.has(c.id);
                     const isDeselected = !c.isExisting && enrolMode === 'update' && !selectedUpdateClassIds.has(c.id);
-                    const customName = config.classNames?.[c.id - 1]?.trim();
+                    const customName = (orderImport && !c.isExisting ? orderImport.classes[c.id - 1]?.grade : null) || config.classNames?.[c.id - 1]?.trim();
                     const isFirstNewRow = enrolMode === 'both' && c.isNew && (rowIdx === 0 || !visibleRows[rowIdx - 1].isNew);
                     return (
                       <React.Fragment key={c.id}>

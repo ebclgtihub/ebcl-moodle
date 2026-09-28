@@ -1,8 +1,38 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use tauri::Manager;
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+
+/// Hosts, an die `http_post_json` senden darf.
+/// Der Command nimmt eine URL aus der Nutzer-Konfiguration entgegen — ohne diese
+/// Einschränkung wäre er ein offener Proxy, über den beliebige Daten aus dem
+/// Webview an beliebige Server geschickt werden könnten.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const ALLOWED_FLOW_HOST_SUFFIXES: [&str; 2] = [
+    ".logic.azure.com",
+    ".environment.api.powerplatform.com",
+];
+
+/// Prüft eine Power-Automate-URL gegen Schema und Host-Allowlist.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn validate_flow_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| format!("Ungültige URL: {}", raw))?;
+    if url.scheme() != "https" {
+        return Err("Nur HTTPS-URLs sind erlaubt.".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL ohne Host.".to_string())?
+        .to_ascii_lowercase();
+    if !ALLOWED_FLOW_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
+    {
+        return Err(format!(
+            "Host nicht erlaubt: {}. Zulässig sind nur Power-Automate-Endpunkte ({}).",
+            host,
+            ALLOWED_FLOW_HOST_SUFFIXES.join(", ")
+        ));
+    }
+    Ok(url)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -176,9 +206,10 @@ async fn zoho_api_post(
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 async fn http_post_json(url: String, body: String) -> Result<String, String> {
+    let target = validate_flow_url(&url)?;
     let client = reqwest::Client::new();
     let resp = client
-        .post(&url)
+        .post(target)
         .header("Content-Type", "application/json")
         .body(body)
         .send()
@@ -206,7 +237,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, zoho_exchange_token, zoho_api_get, zoho_api_post, zoho_get_all_accounts, http_post_json])
+        .invoke_handler(tauri::generate_handler![zoho_exchange_token, zoho_api_get, zoho_api_post, zoho_get_all_accounts, http_post_json])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

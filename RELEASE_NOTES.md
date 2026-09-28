@@ -1,5 +1,38 @@
 # Release Notes
 
+## Unreleased
+
+---
+
+## v2.2.0 - 2026-09-28
+
+### Zugangsdaten-Excel nach neuer Vorlage
+- Dateiname `Zugangsdaten-{Institut}_{Jahr}.xlsx`
+- Spalten `Zugang` (Link) · `Anmeldename` · `Passwort` · `Name Schüler:in` · `Kurs 01…`; Kursnummern passen blattübergreifend zur Übersicht
+- **Kurszellen ohne Link** — die Kurslinks führten ohne Anmeldung als Gast zum Produkt
+- Formatierung: Rahmen, Zeilenhöhe 20, zentriert, jede zweite Zeile grau; Übersicht mit Kursliste und Erläuterungen
+- Excel-Export über `exceljs` statt `xlsx` (SheetJS CE schreibt keine Zellformate)
+
+### Bestellliste vom Marktplatz importieren
+- Neuer Knopf „Bestellliste importieren (.csv)“: Klassen aus `grades`, Trainer aus `LehrerIn`, Klarnamen statt anonymer Konten
+- Anmeldename und E-Mail = E-Mail aus der Bestellung; bPK wird nicht übernommen
+- Prüf-Dialog vor der Übernahme: mehrfach vorkommende oder ungültige E-Mails werden nicht angelegt, sondern aufgelistet
+- Bestehende Konten werden wiederverwendet und behalten ihr Passwort — Excel/PDF zeigen dann „bestehendes Konto – bisheriges Passwort“ statt eines ungültigen neuen Passworts (betrifft auch den Aktualisieren-Modus)
+
+### Diagnose-Protokoll
+- Neuer Bereich „Diagnose-Protokoll“: Warnungen und Fehler (inkl. Moodles Originalmeldung) kopieren oder speichern und an den Support schicken; Passwörter, Tokens und E-Mails werden vorher entfernt
+- Fehlgeschlagene Einschreibungen zeigen jetzt Moodles Begründung statt „Bitte Moodle-Berechtigungen und Kurs-IDs prüfen“
+
+### Sicherheit
+- **Content-Security-Policy aktiviert** — bisher lief der Webview ohne CSP; jetzt sind Inline-Skripte und `eval` blockiert
+- **`http_post_json` auf Power-Automate-Hosts begrenzt** — der Command nahm bisher jede beliebige URL entgegen
+- **Passwörter aus `crypto.getRandomValues`** statt `Math.random()`, Mischen per Fisher-Yates — Initialkennwörter sind nicht mehr vorhersagbar
+- Zoho-Token und Moodle-Antworten werden nicht mehr in die Konsole geloggt
+- `npm ci` statt `npm install` im Release-Workflow — Builds nutzen exakt die Versionen aus dem Lockfile
+- jsPDF auf 4.2.1 und DOMPurify auf 3.4.13 aktualisiert (bekannte Schwachstellen)
+- Ungenutzten `greet`-Command aus dem Tauri-Backend entfernt
+
+
 ## v2.0.0 - 2026-03-19
 
 ### Aktualisieren-Modus
