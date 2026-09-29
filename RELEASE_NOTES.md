@@ -4,6 +4,12 @@
 
 ---
 
+## v2.2.2 - 2026-09-29
+
+### Zugangsdaten-Excel
+- Kursnamen sind wieder als Link zum Kurs hinterlegt (in 2.2.0 irrtümlich entfernt — die Gast-Ansicht kam vom aktivierten Gastzugang im Kurs, nicht vom Link)
+
+
 ## v2.2.1 - 2026-09-29
 
 ### Zugangsdaten-Excel

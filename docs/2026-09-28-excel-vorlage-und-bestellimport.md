@@ -9,7 +9,7 @@ Stand: 28.09.2026 · Auslöser: Victors Vorlage `Zugangsdaten-Name_2026.xlsx` un
 - Blatt **Übersicht**: Titel „Zugangsdaten – Übersicht“, Institut, Datum, Freischaltzeitraum, Gesamt-Accounts, Zugang (Link);
   Tabelle Gruppe | Typ | Anzahl Accounts; darunter je Kurs `Kurs 01 | voller Kursname`; Block „ERLÄUTERUNGEN“.
 - Blätter **Trainer** / **Klasse-xx**: `Zugang` (Link auf https://world.ebcl.eu/) | `Anmeldename` | `Passwort` | `Name Schüler:in` | `Kurs 01…`
-  - Kurszellen: Kurzname, **kein Link** (Kurslinks führten ohne Login als Gast zum Produkt)
+  - Kurszellen: Kurzname mit Link zum Kurs (Gast-Ansicht kam vom aktivierten Gastzugang im Kurs, nicht vom Link — Korrektur 29.09.2026)
   - Kursnummern sind blattübergreifend gleich und passen zur Übersicht
   - Bestehende Konten (Passwort nicht gesetzt): „bestehendes Konto – bisheriges Passwort“
 - Format: Schrift 12, Zeilenhöhe 20, dünne Rahmen, zentriert, jede 2. Datenzeile grau (Vorlage: Designfarbe „Hintergrund 2“)
