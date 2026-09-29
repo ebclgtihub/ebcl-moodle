@@ -70,10 +70,14 @@ function addAccountSheet(wb, name, accounts, courses, nameHeader) {
       a.user,
       a.existing ? EXISTING_PW_TEXT : a.pw,
       a.name || '',
-      // Kurzname ohne Link — Kurslinks führten ohne Login als Gast zum Produkt
       ...courses.map(c => ((a.courses || []).some(ac => String(ac.id) === String(c.id)) ? (c.shorthand || c.label) : '')),
     ]);
     setLink(row.getCell(1), LOGIN_URL);
+    // Kurzname mit Link zum Kurs (ohne Anmeldung landet man bei der Moodle-Anmeldung, sofern der Gastzugang im Kurs aus ist)
+    courses.forEach((c, ci) => {
+      const cell = row.getCell(5 + ci);
+      if (cell.value && c.url) cell.value = { text: String(cell.value), hyperlink: c.url };
+    });
     row.height = ROW_HEIGHT;
     const fill = i % 2 === 1 ? ZEBRA : null; // jede zweite Datenzeile
     for (let col = 1; col <= header.length; col++) styleCell(row.getCell(col), { fill });
