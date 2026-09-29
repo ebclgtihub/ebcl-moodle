@@ -4,6 +4,12 @@
 
 ---
 
+## v2.2.1 - 2026-09-29
+
+### Zugangsdaten-Excel
+- Alle Zeilen 20 hoch — auch Leerzeilen der Übersicht und Zeilen, die Lehrkräfte selbst ergänzen (Standard-Zeilenhöhe der Blätter = 20)
+
+
 ## v2.2.0 - 2026-09-28
 
 ### Zugangsdaten-Excel nach neuer Vorlage

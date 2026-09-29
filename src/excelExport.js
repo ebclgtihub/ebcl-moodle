@@ -53,7 +53,8 @@ function setLink(cell, url) {
  * courses:  Kurse dieses Blatts mit blattübergreifender Nummer { id, shorthand, label, num }
  */
 function addAccountSheet(wb, name, accounts, courses, nameHeader) {
-  const ws = wb.addWorksheet(name);
+  // Standardhöhe fürs ganze Blatt: auch Leerzeilen und von Lehrkräften ergänzte Zeilen sind 20 hoch
+  const ws = wb.addWorksheet(name, { properties: { defaultRowHeight: ROW_HEIGHT } });
   ws.columns = [
     { width: 20.8 }, { width: 34 }, { width: 18 }, { width: 34 },
     ...courses.map(() => ({ width: 40 })),
@@ -107,7 +108,7 @@ export async function buildAccessWorkbook({ institute, dateStr, periodStr, train
   };
 
   // ─── Übersicht ───
-  const ov = wb.addWorksheet('Übersicht');
+  const ov = wb.addWorksheet('Übersicht', { properties: { defaultRowHeight: ROW_HEIGHT } });
   ov.columns = [{ width: 25.8 }, { width: 60 }, { width: 16.8 }, { width: 50.8 }];
   const total = trainers.length + classes.reduce((s, c) => s + c.accounts.length, 0);
   const put = (values, opts = {}) => {
@@ -122,13 +123,13 @@ export async function buildAccessWorkbook({ institute, dateStr, periodStr, train
   put(['Freischaltzeitraum:', periodStr]);
   put(['Gesamt-Accounts:', total]);
   setLink(put(['Zugang:', LOGIN_URL]).getCell(2), LOGIN_URL);
-  ov.addRow([]);
+  ov.addRow([]).height = ROW_HEIGHT;
   put(['Gruppe', 'Typ', 'Anzahl Accounts']);
   if (trainers.length) put(['Trainer', 'Trainer', trainers.length]);
   classes.forEach(c => put([c.label, 'Schüler', c.accounts.length]));
-  ov.addRow([]);
+  ov.addRow([]).height = ROW_HEIGHT;
   numbered.forEach(c => put([courseTitle(c.num), c.label]));
-  ov.addRow([]);
+  ov.addRow([]).height = ROW_HEIGHT;
   put(['ERLÄUTERUNGEN'], { bold: true });
   const expl = ov.addRow([personal ? EXPLANATION_PERSONAL : EXPLANATION_ANONYMOUS]);
   ov.mergeCells(expl.number, 1, expl.number, 4);
