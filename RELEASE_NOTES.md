@@ -4,6 +4,12 @@
 
 ---
 
+## v2.2.3 - 2026-10-01
+
+### Einschreibedauer
+- Standard-Einschreibedauer ist jetzt **340 Tage** (Schulen). Wer noch den alten Standard von 180 Tagen eingestellt hatte, wird einmalig automatisch umgestellt; selbst gewählte andere Werte bleiben erhalten
+
+
 ## v2.2.2 - 2026-09-29
 
 ### Zugangsdaten-Excel

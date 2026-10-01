@@ -56,8 +56,8 @@ const DEFAULT_CONFIG = {
   trainerPwd: '***ENTFERNT***',
   autoPassword: false,
   showLeitfaden: true,
-  enrolPeriod: 180,
-  defaultEnrolPeriod: 180,
+  enrolPeriod: 340,
+  defaultEnrolPeriod: 340,
   enrolDate: new Date().toISOString().split('T')[0],
   classSizes: [20, 25, 30, 40],
   classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
@@ -414,8 +414,12 @@ const App = () => {
         if (zohoClientSecret) setConfig(p => ({ ...p, zohoClientSecret }));
         const zohoRefreshToken = await store.get('zohoRefreshToken');
         if (zohoRefreshToken) setConfig(p => ({ ...p, zohoRefreshToken }));
-        const defaultEnrolPeriod = await store.get('defaultEnrolPeriod');
+        // Schulen bekommen 340 Tage: alter Standard 180 wird einmalig umgestellt, selbst gewählte Werte bleiben
+        const storedEnrolPeriod = await store.get('defaultEnrolPeriod');
+        const schoolPeriodApplied = await store.get('schoolEnrolPeriodApplied');
+        const defaultEnrolPeriod = !schoolPeriodApplied && Number(storedEnrolPeriod) === 180 ? 340 : storedEnrolPeriod;
         if (defaultEnrolPeriod != null) setConfig(p => ({ ...p, defaultEnrolPeriod, enrolPeriod: defaultEnrolPeriod }));
+        if (!schoolPeriodApplied) await store.set('schoolEnrolPeriodApplied', true);
         const customAccents = await store.get('customAccents');
         if (Array.isArray(customAccents) && customAccents.length) setConfig(p => ({ ...p, customAccents }));
         const tagColorMap = await store.get('tagColorMap');
