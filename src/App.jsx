@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { uploadToSharePoint, uploadMoodleResultToSharePoint } from './sharepoint';
 import { enrollInMoodle, fetchFullEnrollments, fetchMoodleCourses, findMaxNumbers, fetchInstituteGroups, fetchGroupMembers, fetchInstituteUsers , findExistingUsernames } from './moodle';
 import { getAllZohoAccounts, findOrCreateZohoAccount, createZohoDeal } from './zoho';
-import { captureConsole, setSecretProvider, buildLogText, copyToClipboard, entryCount, logInfo, logWarn, logError } from './logger';
+import { captureConsole, setSecretProvider, buildLogText, copyToClipboard, entryCount, clearLog, enablePersistence, logInfo, logWarn, logError } from './logger';
 import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -303,6 +303,10 @@ const App = () => {
   // ─── App-Version ──────────────────────────────────────────────────────────
   useEffect(() => {
     import('@tauri-apps/api/app').then(m => m.getVersion()).then(setAppVersion).catch(() => setAppVersion('0.1.6'));
+    // Diagnose-Protokoll über Neustarts behalten; Sitzungsbeginn als Trennzeile
+    enablePersistence(new LazyStore('diagnose-log.json', { autoSave: false }))
+      .finally(() => import('@tauri-apps/api/app').then(m => m.getVersion()).catch(() => '?')
+        .then(v => logInfo('sitzung', '──── App gestartet ────', `Version ${v}`)));
   }, []); // eslint-disable-line
 
   // ─── Updater ──────────────────────────────────────────────────────────────
@@ -613,6 +617,14 @@ const App = () => {
       logError('diagnose', 'Speichern fehlgeschlagen', e);
       addToast('Speichern fehlgeschlagen — bitte „Kopieren" nutzen.', 'error');
     }
+  }, [logHeader, addToast]);
+
+  const [, setLogRev] = useState(0);
+  const handleClearLog = useCallback(() => {
+    clearLog();
+    logInfo('sitzung', 'Protokoll geleert');
+    setLogRev(r => r + 1);
+    addToast('Protokoll geleert.', 'success');
   }, [logHeader, addToast]);
 
   // ─── Kurs-Pool ────────────────────────────────────────────────────────────
@@ -1995,7 +2007,7 @@ const App = () => {
                 <Row label="Kurs Anzahl" desc="Anzahl der Kursspalten in der Matrix (max. 8). Entspricht der Anzahl der Moodle-Kurse pro Institut." />
               </HSection>
               <HSection icon={<GraduationCap size={14} />} title="Modus">
-                <Row label="Aktualisieren" desc="Klassen werden aus Moodle geladen. Bestehende Einschreibungen werden erkannt (RefreshCw) und beim Einschreiben aktualisiert (Zeitraum, Passwort)." />
+                <Row label="Aktualisieren" desc="Klassen werden aus Moodle geladen. Bestehende Einschreibungen werden erkannt (RefreshCw) und beim Einschreiben aktualisiert (Zeitraum, Kurse — Passwörter bleiben unverändert)." />
                 <Row label="Neu anlegen" desc="Neue Accounts werden generiert, fortlaufend nach den höchsten bestehenden Nummern in Moodle. Klassen, Schüler und Trainer werden automatisch weiternummeriert." />
                 <Row label="Aktualisieren & Neu anlegen" desc="Kombinierter Modus: bestehende Klassen auswählen (werden aktualisiert) und zusätzlich neue Klassen konfigurieren — in einem Durchlauf." />
               </HSection>
@@ -2617,13 +2629,16 @@ const App = () => {
               </h4>
               <p style={{ color: C.muted }} className="text-[10px] mb-3 opacity-60">Hält fest, was die App mit Moodle, Zoho und Power Automate macht — mit den genauen Fehlermeldungen. Zugangsdaten, Passwörter und E-Mail-Adressen werden vorher entfernt. Bei Problemen kopieren oder speichern und an den Support schicken.</p>
               <div style={{ backgroundColor: C.subtle, borderColor: C.border }} className="p-3 rounded-xl border shadow-sm flex items-center justify-between gap-2">
-                <p style={{ color: C.muted }} className="text-[9px]">{entryCount()} Einträge in dieser Sitzung</p>
+                <p style={{ color: C.muted }} className="text-[9px]">{entryCount()} Einträge (letzte 14 Tage, auch nach Neustart)</p>
                 <div className="flex items-center gap-2">
                   <button onClick={handleCopyLog} style={{ borderColor: C.border, color: C.text }} className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5">
                     <ClipboardList size={11} /> Kopieren
                   </button>
                   <button onClick={handleSaveLog} style={{ borderColor: C.border, color: C.text }} className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5">
                     <FileDown size={11} /> Speichern
+                  </button>
+                  <button onClick={handleClearLog} title="Alle Einträge löschen" style={{ borderColor: C.border, color: C.muted }} className="border px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase hover:opacity-70 active:scale-95 transition-all flex items-center gap-1.5">
+                    <Trash2 size={11} /> Leeren
                   </button>
                 </div>
               </div>
