@@ -4,6 +4,18 @@
 
 ---
 
+## v2.3.0 - 2026-10-02
+
+### Diagnose-Protokoll bleibt erhalten
+- Das Protokoll wird jetzt gespeichert und übersteht das Schließen der App — es enthält die letzten 14 Tage (höchstens 3000 Einträge)
+- Jeder App-Start ist als Trennzeile mit Version markiert, jeder Eintrag hat Datum und Uhrzeit
+- Neuer Knopf „Leeren“ (Settings → Backend → Diagnose-Protokoll)
+- Passwörter, Tokens und E-Mail-Adressen werden wie bisher vor dem Speichern unkenntlich gemacht
+
+### Kleinigkeiten
+- Hilfetext zum Modus „Aktualisieren“ korrigiert: Passwörter bleiben dabei unverändert
+
+
 ## v2.2.3 - 2026-10-01
 
 ### Einschreibedauer

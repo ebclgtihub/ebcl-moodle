@@ -1,8 +1,9 @@
 /**
  * Diagnose-Protokoll für Supportfälle.
  *
- * Hält die Einträge der laufenden Sitzung im Speicher und gibt sie als Text aus,
- * den Nutzer:innen kopieren oder speichern und an den Support schicken.
+ * Hält die Einträge im Speicher und gibt sie als Text aus, den Nutzer:innen kopieren
+ * oder speichern und an den Support schicken. Mit enablePersistence() überleben die
+ * Einträge einen Neustart (14 Tage) — Fehler werden oft erst Tage später gemeldet.
  *
  * Grundsatz: Kein Zugangsgeheimnis darf im Protokoll landen. Deshalb zweistufig —
  *  1. beim Aufzeichnen werden bekannte Muster maskiert (Token, Passwörter,
@@ -11,12 +12,16 @@
  *     ersetzt, auch wenn er keinem Muster entspricht.
  */
 
-const MAX_ENTRIES = 1000;
+const MAX_ENTRIES = 3000;
+const MAX_AGE_DAYS = 14;
+const SAVE_DELAY_MS = 3000;
 const MAX_TEXT = 1200;
 
 const entries = [];
 let secretProvider = () => ({});
 let consoleHooked = false;
+let persistStore = null;   // Tauri-Store (get/set/save), gesetzt über enablePersistence()
+let saveTimer = null;
 
 const SECRET_FIELDS = [
   'wstoken', 'token', 'moodleToken', 'access_token', 'refresh_token', 'id_token',
@@ -66,6 +71,50 @@ function clock(ts) {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/** Datum + Uhrzeit — das Protokoll umfasst mehrere Tage. */
+function stamp(ts) {
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${clock(ts)}`;
+}
+
+/** Speichert gebündelt — nicht bei jedem Eintrag auf die Platte schreiben. */
+function scheduleSave() {
+  if (!persistStore || saveTimer) return;
+  saveTimer = setTimeout(() => { saveTimer = null; flushLog(); }, SAVE_DELAY_MS);
+}
+
+/** Schreibt den aktuellen Stand sofort in den Store. Fehler werden geschluckt — das Protokoll darf die App nie stören. */
+export async function flushLog() {
+  if (!persistStore) return;
+  try {
+    await persistStore.set('entries', entries);
+    await persistStore.save();
+  } catch { /* still */ }
+}
+
+/**
+ * Lädt gespeicherte Einträge (jünger als 14 Tage) vor die aktuellen und speichert ab jetzt mit.
+ * Gespeichert wird nur bereits maskierter Text (siehe log()).
+ */
+export async function enablePersistence(store) {
+  if (persistStore || !store) return;
+  try {
+    const saved = await store.get('entries');
+    if (Array.isArray(saved)) {
+      const cutoff = Date.now() - MAX_AGE_DAYS * 86400000;
+      const keep = saved.filter(e => e && typeof e.text === 'string' && (e.until || e.ts) >= cutoff);
+      entries.unshift(...keep);
+      if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
+    }
+  } catch { /* beschädigte oder fehlende Datei: neu beginnen */ }
+  persistStore = store;
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('beforeunload', () => { flushLog(); });
+  }
+  scheduleSave();
+}
+
 /**
  * Schreibt einen Eintrag. Folgt ein identischer Eintrag direkt auf den vorigen,
  * wird nur mitgezählt — sonst verdrängen hunderte gleiche Ablehnungen den Rest.
@@ -79,10 +128,12 @@ export function log(level, area, message, detail) {
   if (last && last.level === level && last.area === area && last.text === text) {
     last.count += 1;
     last.until = now;
+    scheduleSave();
     return;
   }
   entries.push({ ts: now, level, area, text, count: 1, until: now });
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
+  scheduleSave();
 }
 
 export const logInfo = (area, message, detail) => log('info', area, message, detail);
@@ -112,7 +163,7 @@ export function setSecretProvider(fn) {
 }
 
 export const entryCount = () => entries.length;
-export const clearLog = () => { entries.length = 0; };
+export const clearLog = () => { entries.length = 0; flushLog(); };
 
 /** Baut den exportierbaren Text. `header` sind Schlüssel/Wert-Paare für den Kopf. */
 export function buildLogText(header = {}) {
@@ -122,12 +173,12 @@ export function buildLogText(header = {}) {
     'EBC*L Moodle-Anlage — Diagnose-Protokoll',
     `Erstellt: ${new Date().toLocaleString('de-AT')}`,
     ...Object.entries(header).map(([k, v]) => `${k}: ${v}`),
-    `Einträge: ${entries.length} (höchstens ${MAX_ENTRIES}, älteste zuerst)`,
+    `Einträge: ${entries.length} (letzte ${MAX_AGE_DAYS} Tage, höchstens ${MAX_ENTRIES}, älteste zuerst)`,
     'Zugangsdaten, Passwörter und E-Mail-Adressen sind entfernt.',
     '-'.repeat(72),
     ...entries.map(e => {
       const repeat = e.count > 1 ? ` (${e.count}× bis ${clock(e.until)})` : '';
-      return `${clock(e.ts)}  ${e.level.toUpperCase().padEnd(5)} [${e.area}] ${e.text}${repeat}`;
+      return `${stamp(e.ts)}  ${e.level.toUpperCase().padEnd(5)} [${e.area}] ${e.text}${repeat}`;
     }),
   ];
   return redact(lines.join('\n'), secrets);
