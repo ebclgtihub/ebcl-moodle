@@ -52,9 +52,10 @@ const DARK = {
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG = {
   institute: '',
-  studentPwd: '***ENTFERNT***',
-  trainerPwd: '***ENTFERNT***',
-  autoPassword: false,
+  // Keine Passwörter im Code: bestehende Installationen lesen ihre Werte aus dem Store
+  studentPwd: '',
+  trainerPwd: '',
+  autoPassword: true,
   showLeitfaden: true,
   enrolPeriod: 340,
   defaultEnrolPeriod: 340,
@@ -984,6 +985,7 @@ const App = () => {
   const generateList = useCallback(async (confirmed = false) => {
     if (!config.institute?.trim()) return addToast('Bitte Institutsnamen eingeben.', 'error');
     if (!classRows.length && !config.trainerCount) return addToast('Keine Klassen oder Trainer.', 'error');
+    if (!config.autoPassword && (!config.studentPwd?.trim() || !config.trainerPwd?.trim())) return addToast('Bitte Passwort für Schüler und Trainer eintragen oder automatische Passwörter einschalten.', 'error');
     if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
     setShowGenerateConfirm(false);
     const activeIds = activeMatrixCourses.map(c => String(c.id));
@@ -3744,7 +3746,7 @@ const App = () => {
                         value={config.autoPassword ? '' : config[f.name]}
                         onChange={handleInput}
                         disabled={config.autoPassword}
-                        placeholder={config.autoPassword ? 'Auto-generiert' : ''}
+                        placeholder={config.autoPassword ? 'Auto-generiert' : 'Passwort eintragen'}
                         style={{ color: C.text }}
                         className="w-full bg-transparent text-[11px] font-mono font-medium outline-none disabled:cursor-not-allowed placeholder:opacity-60 placeholder:font-sans placeholder:not-italic" />
                     </div>

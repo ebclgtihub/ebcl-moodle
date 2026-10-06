@@ -4,6 +4,14 @@
 
 ---
 
+## v2.3.1 - 2026-10-06
+
+### Passwörter
+- Die App enthält keine voreingestellten Passwörter mehr. Wer bisher feste Passwörter für Schüler und Trainer verwendet, behält sie – sie werden aus den eigenen Einstellungen übernommen
+- Bei einer Neuinstallation sind automatische Passwörter (eines pro Konto) voreingestellt; feste Passwörter lassen sich in den Einstellungen weiterhin eintragen
+- Ist „Automatisch“ aus und kein Passwort eingetragen, weist die App beim Erzeugen der Liste darauf hin
+
+
 ## v2.3.0 - 2026-10-02
 
 ### Diagnose-Protokoll bleibt erhalten
