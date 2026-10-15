@@ -4,6 +4,13 @@
 
 ---
 
+## v2.3.2 - 2026-10-15
+
+### Einschreibedauer
+- Neue Standard-Einschreibedauer: **320 Tage**. Mit dem Update wird sie einmalig für alle auf 320 gesetzt; wer danach unter Settings → Klassen → „Standard-Einschreibedauer“ einen anderen Wert einträgt, behält ihn
+- Für einzelne Einschreibungen lässt sich die Dauer wie bisher direkt im Feld „Dauer (Tage)“ ändern
+
+
 ## v2.3.1 - 2026-10-06
 
 ### Passwörter

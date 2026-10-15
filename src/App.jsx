@@ -57,8 +57,8 @@ const DEFAULT_CONFIG = {
   trainerPwd: '',
   autoPassword: true,
   showLeitfaden: true,
-  enrolPeriod: 340,
-  defaultEnrolPeriod: 340,
+  enrolPeriod: 320,
+  defaultEnrolPeriod: 320,
   enrolDate: new Date().toISOString().split('T')[0],
   classSizes: [20, 25, 30, 40],
   classCounts: { 0: 1, 1: 1, 2: 1, 3: 1 },
@@ -419,12 +419,16 @@ const App = () => {
         if (zohoClientSecret) setConfig(p => ({ ...p, zohoClientSecret }));
         const zohoRefreshToken = await store.get('zohoRefreshToken');
         if (zohoRefreshToken) setConfig(p => ({ ...p, zohoRefreshToken }));
-        // Schulen bekommen 340 Tage: alter Standard 180 wird einmalig umgestellt, selbst gewählte Werte bleiben
+        // Standard 320 Tage: wird einmalig für alle gesetzt (auch bisher gespeicherte 180/330/340),
+        // danach bleibt ein selbst gewählter Wert erhalten
         const storedEnrolPeriod = await store.get('defaultEnrolPeriod');
-        const schoolPeriodApplied = await store.get('schoolEnrolPeriodApplied');
-        const defaultEnrolPeriod = !schoolPeriodApplied && Number(storedEnrolPeriod) === 180 ? 340 : storedEnrolPeriod;
+        const period320Applied = await store.get('enrolPeriod320Applied');
+        const defaultEnrolPeriod = period320Applied ? storedEnrolPeriod : 320;
         if (defaultEnrolPeriod != null) setConfig(p => ({ ...p, defaultEnrolPeriod, enrolPeriod: defaultEnrolPeriod }));
-        if (!schoolPeriodApplied) await store.set('schoolEnrolPeriodApplied', true);
+        if (!period320Applied) {
+          await store.set('defaultEnrolPeriod', 320);
+          await store.set('enrolPeriod320Applied', true);
+        }
         const customAccents = await store.get('customAccents');
         if (Array.isArray(customAccents) && customAccents.length) setConfig(p => ({ ...p, customAccents }));
         const tagColorMap = await store.get('tagColorMap');
