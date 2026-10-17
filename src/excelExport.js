@@ -9,6 +9,10 @@ import ExcelJS from 'exceljs';
 
 export const LOGIN_URL = 'https://world.ebcl.eu/';
 export const EXISTING_PW_TEXT = 'bestehendes Konto – bisheriges Passwort';
+export const MOODLE_PW_TEXT = 'per E-Mail von Moodle';
+
+/** Was in der Passwort-Spalte steht: bestehendes Konto, von Moodle gemailt oder das gesetzte Passwort. */
+export const passwordLabel = a => (a.existing ? EXISTING_PW_TEXT : a.pwByMoodle ? MOODLE_PW_TEXT : a.pw);
 
 const FONT = { name: 'Aptos', size: 12 };
 const ZEBRA = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E8E8' } };
@@ -68,7 +72,7 @@ function addAccountSheet(wb, name, accounts, courses, nameHeader) {
     const row = ws.addRow([
       null,
       a.user,
-      a.existing ? EXISTING_PW_TEXT : a.pw,
+      passwordLabel(a),
       a.name || '',
       ...courses.map(c => ((a.courses || []).some(ac => String(ac.id) === String(c.id)) ? (c.shorthand || c.label) : '')),
     ]);

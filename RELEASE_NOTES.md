@@ -4,6 +4,16 @@
 
 ---
 
+## v2.4.0 - 2026-10-17
+
+### Passwort per E-Mail von Moodle (Bestellliste)
+- Neuer Schalter unter „Bestellliste (Marktplatz)“: **Passwort von Moodle per E-Mail**
+- Ist er an, erzeugt Moodle für jedes neue Konto selbst ein Passwort und schickt es an die E-Mail-Adresse aus der Bestellung
+- In Excel und PDF steht dann statt des Passworts „per E-Mail von Moodle“
+- Bereits bestehende Konten behalten ihr Passwort und bekommen keine Mail
+- Nur bei der Bestellliste verfügbar – bei anonymen Klassenlisten gibt es keine echten E-Mail-Adressen
+
+
 ## v2.3.2 - 2026-10-15
 
 ### Einschreibedauer

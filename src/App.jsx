@@ -7,7 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import QRCode from 'qrcode';
-import { buildAccessWorkbook, excelFileName, EXISTING_PW_TEXT } from './excelExport';
+import { buildAccessWorkbook, excelFileName, passwordLabel } from './excelExport';
 import { parseOrderCsv } from './orderImport';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
@@ -213,6 +213,8 @@ const App = () => {
   // Bestellliste (Marktplatz-CSV): orderPreview = geprüft, noch nicht übernommen; orderImport = aktiv
   const [orderPreview, setOrderPreview] = useState(null);
   const [orderImport, setOrderImport] = useState(null);
+  // Bestellliste: Passwort von Moodle erzeugen und per E-Mail schicken lassen statt selbst zu vergeben
+  const [moodlePwMail, setMoodlePwMail] = useState(false);
   const [isGenerated, setIsGenerated] = useState(false);
   const [isExportingPDF, setIsExportingPDF] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
@@ -989,7 +991,7 @@ const App = () => {
   const generateList = useCallback(async (confirmed = false) => {
     if (!config.institute?.trim()) return addToast('Bitte Institutsnamen eingeben.', 'error');
     if (!classRows.length && !config.trainerCount) return addToast('Keine Klassen oder Trainer.', 'error');
-    if (!config.autoPassword && (!config.studentPwd?.trim() || !config.trainerPwd?.trim())) return addToast('Bitte Passwort für Schüler und Trainer eintragen oder automatische Passwörter einschalten.', 'error');
+    if (!(orderImport && moodlePwMail) && !config.autoPassword && (!config.studentPwd?.trim() || !config.trainerPwd?.trim())) return addToast('Bitte Passwort für Schüler und Trainer eintragen oder automatische Passwörter einschalten.', 'error');
     if (!confirmed && unusualWarnings.length > 0) { setShowGenerateConfirm(true); return; }
     setShowGenerateConfirm(false);
     const activeIds = activeMatrixCourses.map(c => String(c.id));
@@ -1014,7 +1016,9 @@ const App = () => {
       const pw = isT => (config.autoPassword ? generatePassword() : (isT ? config.trainerPwd : config.studentPwd));
       const person = (p, extra) => ({
         isT: p.isT, first: p.first, last: p.last, user: p.email, mail: p.email,
-        displayName: `${p.first} ${p.last}`, pw: pw(p.isT), ...extra,
+        displayName: `${p.first} ${p.last}`,
+        ...(moodlePwMail ? { pw: '', pwByMoodle: true } : { pw: pw(p.isT) }),
+        ...extra,
       });
       const data = orderImport.persons.filter(p => p.isT).map(p => person(p, { cNum: 'ALL', courses: activeMatrixCourses }));
       effectiveClassRows.forEach(r => {
@@ -1259,7 +1263,7 @@ const App = () => {
     });
     setGeneratedData(data); setIsGenerated(true); setActiveModal('dataPreview');
     addToast(`${data.length} Accounts generiert.`, 'success');
-  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, allMoodleCourses, getClassLabel, addToast, unusualWarnings, enrolMode, selectedUpdateClassIds, moodleGroups, selectedMoodleGroupIds, orderImport]); // eslint-disable-line
+  }, [config, classRows, classMatrix, activeMatrixCourses, courseDictionary, allMoodleCourses, getClassLabel, addToast, unusualWarnings, enrolMode, selectedUpdateClassIds, moodleGroups, selectedMoodleGroupIds, orderImport, moodlePwMail]); // eslint-disable-line
 
   // ─── CSV ──────────────────────────────────────────────────────────────────
   const buildCsvBlob = useCallback(() => {
@@ -1294,7 +1298,7 @@ const App = () => {
   const buildExcelBlob = useCallback(async (dataOverride = null) => {
     const data = dataOverride ?? generatedData;
     if (!data.length) return null;
-    const toAccount = d => ({ user: d.user, pw: d.pw, name: d.displayName || '', existing: !!d.existing, courses: d.courses || [] });
+    const toAccount = d => ({ user: d.user, pw: d.pw, name: d.displayName || '', existing: !!d.existing, pwByMoodle: !!d.pwByMoodle, courses: d.courses || [] });
     const classIds = [...new Set(data.filter(d => !d.isT).map(d => d.cNum))].sort();
     const classes = classIds.map(id => {
       const students = data.filter(d => !d.isT && d.cNum === id);
@@ -1513,7 +1517,7 @@ const App = () => {
         renderHeader('Zugangsdaten: Trainer', `ANZAHL: ${trainers.length}`);
         autoTable(doc, {
           head: [['Name (fakultativ)', 'Username', 'Passwort', ...trainerCourses.map((_, i) => `Kurs ${i + 1}`)]],
-          body: trainers.map(t => [t.displayName || '', t.user, t.existing ? EXISTING_PW_TEXT : t.pw, ...courseRow(t, trainerCourses)]),
+          body: trainers.map(t => [t.displayName || '', t.user, passwordLabel(t), ...courseRow(t, trainerCourses)]),
           ...tOpts(trainerCourses, `Trainer — ${config.institute}`),
           didParseCell: d => { if (d.section === 'body') d.cell.styles.fillColor = [255, 255, 245]; }
         });
@@ -1529,7 +1533,7 @@ const App = () => {
 
         autoTable(doc, {
           head: [['Name (fakultativ)', 'Username', 'Passwort', ...classCourses.map((_, i) => `Kurs ${i + 1}`)]],
-          body: students.map(s => [s.displayName || '', s.user, s.existing ? EXISTING_PW_TEXT : s.pw, ...courseRow(s, classCourses)]),
+          body: students.map(s => [s.displayName || '', s.user, passwordLabel(s), ...courseRow(s, classCourses)]),
           ...tOpts(classCourses, `${classLabel} — ${config.institute}`)
         });
       });
@@ -1790,7 +1794,7 @@ const App = () => {
         ...(result.warnings.length ? ['Hinweise', '--------', ...result.warnings, ''] : []),
         'Accounts', '--------',
         ...exportData.map(u =>
-          `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${u.existing ? EXISTING_PW_TEXT : u.pw}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
+          `${u.isT ? '[Trainer]' : '[Schüler]'}  ${u.user.padEnd(40)} PW: ${passwordLabel(u)}  Kurse: ${u.courses.map(c => c.shorthand).join(', ')}`
         ),
       ];
       const txtBlob = new Blob([lines.join('\r\n')], { type: 'text/plain;charset=utf-8' });
@@ -3597,7 +3601,14 @@ const App = () => {
                         </div>
                         <button onClick={clearOrderImport} title="Bestellliste entfernen" style={{ color: C.muted }} className="p-1 hover:bg-black/5 rounded-lg"><X size={14} /></button>
                       </div>
-                    ) : (
+                    ) : null}
+                    {orderImport && (
+                      <label className="mt-1.5 ml-1 flex items-start gap-2 cursor-pointer" title="Moodle erzeugt für neue Konten ein Passwort und schickt es an die E-Mail-Adresse aus der Bestellung. Bestehende Konten behalten ihr Passwort und bekommen keine Mail.">
+                        <input type="checkbox" checked={moodlePwMail} onChange={e => { setMoodlePwMail(e.target.checked); setIsGenerated(false); }} className="mt-0.5" />
+                        <span style={{ color: C.text }} className="text-[9px] leading-snug"><strong>Passwort von Moodle per E-Mail</strong> — Moodle erzeugt das Passwort und mailt es an die Adresse aus der Bestellung. In der Excel steht dann „per E-Mail von Moodle“.</span>
+                      </label>
+                    )}
+                    {!orderImport && (
                       <label style={{ borderColor: C.border, color: C.muted }} className="w-full py-2 text-[10px] font-bold uppercase tracking-wide border border-dashed rounded-xl flex items-center justify-center gap-1.5 cursor-pointer hover:bg-black/5 transition-all">
                         <Upload size={12} /> Bestellliste importieren (.csv)
                         <input type="file" accept=".csv,text/csv" onChange={handleOrderFile} className="hidden" />

@@ -185,7 +185,9 @@ export async function enrollInMoodle({
 
   const usersPayload = generatedData.map(u => ({
     username: u.user?.trim().toLowerCase(),
-    password: u.pw?.trim(),
+    // pwByMoodle: Moodle erzeugt das Passwort und mailt es an die E-Mail-Adresse (createpassword)
+    password: u.pwByMoodle ? undefined : u.pw?.trim(),
+    createpassword: u.pwByMoodle ? 1 : undefined,
     firstname: u.first?.trim(),
     lastname: u.last?.trim(),
     email: u.mail?.trim().toLowerCase(),
