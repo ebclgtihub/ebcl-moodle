@@ -1827,11 +1827,16 @@ const App = () => {
         const today = new Date().toISOString().split('T')[0];
         const enrolStart = new Date(config.enrolDate).toLocaleDateString('de-DE');
         const dealName = `Moodle Einschreibung – ${enrolStart} – ${endDateFormatted}`;
+        // Schülerzahlen für die CRM-Auswertung: nur tatsächlich eingeschriebene Konten (exportData),
+        // ohne Trainer. „neu“ = Konto erst in diesem Lauf angelegt (zählt pro Monat nicht doppelt).
+        const students = exportData.filter(u => !u.isT);
+        const studentsNew = students.filter(u => !u.existing).length;
         const description = [
           `Institut: ${config.institute}`,
           `Datum: ${fmtDateTime(new Date())}`,
           `Einschreibezeitraum: ${new Date(config.enrolDate).toLocaleDateString('de-DE')} – ${endDateFormatted}`,
           '',
+          `Schüler: ${students.length} (${studentsNew} neu)`,
           `User: ${result.usersResolved} gesamt (${result.usersCreated} neu, ${result.usersResolved - result.usersCreated} bereits vorhanden)`,
           `Einschreibungen: ${result.enrolmentsDone}`,
           `Gruppen: ${result.groupsCreated}`,
@@ -1840,7 +1845,7 @@ const App = () => {
           `Kurse: ${activeMatrixCourses.map(c => c.shorthand).join(', ')}`,
           `Moodle-URL: ${config.moodleUrl}`,
         ].join('\n');
-        await createZohoDeal(config, account.id, dealName, today, description);
+        await createZohoDeal(config, account.id, dealName, today, description, { studentsNew, studentsTotal: students.length });
         zohoDone = true;
       } catch (e) {
         console.error('[Zoho] CRM-Fehler:', e);

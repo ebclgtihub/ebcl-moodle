@@ -4,6 +4,15 @@
 
 ---
 
+## v2.5.0 - 2026-10-20
+
+### Schülerzahl im CRM
+- Beim Einschreiben schreibt die App jetzt die Zahl der Schüler in den Abschluss im Zoho CRM: **Schüler neu** (in diesem Lauf neu angelegte Konten) und **Schüler gesamt** (alle Schüler dieses Laufs, auch bestehende Konten)
+- Trainer werden dabei nicht mitgezählt
+- Damit zeigt das CRM-Dashboard, wie viele Schüler pro Monat und pro Schule dazukommen
+- Die Zahl steht zusätzlich in der Beschreibung des Abschlusses
+
+
 ## v2.4.0 - 2026-10-17
 
 ### Passwort per E-Mail von Moodle (Bestellliste)

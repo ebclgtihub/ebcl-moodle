@@ -95,19 +95,22 @@ export async function findOrCreateZohoAccount(config, name) {
 
 /**
  * Erstellt einen Abschluss (Deal) an einem Zoho Account.
+ * counts (optional): { studentsNew, studentsTotal } → CRM-Felder Schueler_neu / Schueler_gesamt
+ * (Zahlenfelder für die Dashboard-Auswertung, nur gesetzt wenn es Zahlen sind).
  */
-export async function createZohoDeal(config, accountId, dealName, closingDate, description) {
+export async function createZohoDeal(config, accountId, dealName, closingDate, description, counts = {}) {
   const { zohoClientId, zohoClientSecret, zohoRefreshToken } = config;
 
-  const payload = {
-    data: [{
-      Deal_Name: dealName,
-      Stage: 'Closed Won',
-      Closing_Date: closingDate,
-      Account_Name: { id: accountId },
-      Description: description,
-    }],
+  const deal = {
+    Deal_Name: dealName,
+    Stage: 'Closed Won',
+    Closing_Date: closingDate,
+    Account_Name: { id: accountId },
+    Description: description,
   };
+  if (Number.isInteger(counts.studentsNew)) deal.Schueler_neu = counts.studentsNew;
+  if (Number.isInteger(counts.studentsTotal)) deal.Schueler_gesamt = counts.studentsTotal;
+  const payload = { data: [deal] };
   console.log('[Zoho] createZohoDeal accountId:', accountId, 'typeof:', typeof accountId);
   console.log('[Zoho] createZohoDeal payload:', JSON.stringify(payload, null, 2));
 
