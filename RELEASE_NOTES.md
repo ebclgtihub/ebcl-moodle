@@ -4,6 +4,15 @@
 
 ---
 
+## v2.6.0 - 2026-10-23
+
+### Schüler zu bestehenden Klassen hinzufügen
+- In den Modi „Aktualisieren“ und „Aktualisieren & Neu anlegen“ gibt es jetzt auch bei Klassen mit Schülern den Stift neben der Platzzahl: Dort trägst du ein, wie viele **neue** Schüler in diese Klasse kommen (z. B. 2)
+- Die neuen Schüler werden fortlaufend nummeriert (z. B. …-student-034 und -035) und in dieselbe Klasse eingeschrieben – keine zusätzliche Klasse mehr nötig
+- Bestehende Konten und Passwörter bleiben unverändert; die Matrix zeigt z. B. „33 + 2 Pl.“
+- In Excel und PDF stehen die neuen Schüler im Blatt ihrer Klasse; bestehende Klassen tragen dort jetzt ihren Moodle-Namen statt „Klasse-01“ usw.
+
+
 ## v2.5.0 - 2026-10-20
 
 ### Schülerzahl im CRM

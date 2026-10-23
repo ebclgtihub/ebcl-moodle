@@ -728,11 +728,14 @@ const App = () => {
       const existingRows = moodleGroups.map((g, i) => {
         const rowId = i + 1;
         const customSize = config.classCustomSizes?.[rowId];
-        // Leere Gruppen (Nutzer manuell gelöscht): Custom-Größe erlaubt neue Schüler einzuschreiben
-        const size = g.memberCount === 0 && customSize != null ? customSize : g.memberCount;
+        // Custom-Größe bei bestehenden Gruppen = Anzahl NEUER Schüler, die dazukommen
+        // (leere Gruppe: alle Schüler sind neu; volle Gruppe: zusätzlich zu den Mitgliedern)
+        const newCount = customSize != null ? customSize : 0;
+        const size = g.memberCount + newCount;
         return {
           id: rowId,
           size,
+          newCount,
           typeIdx: 0,
           defaultSize: g.memberCount,
           groupName: g.name,
@@ -786,13 +789,22 @@ const App = () => {
     setSelectedUpdateClassIds(new Set(classRows.map(r => r.id)));
   }, [classRows]);
 
+  // Zusätzliche Schüler bei geladenen Gruppen (classCustomSizes) gehören zu genau diesen Gruppen —
+  // beim Verwerfen der Gruppen mitlöschen, sonst gelten sie für die Zeilen der nächsten Schule
+  const moodleGroupsLoadedRef = useRef(false);
+  const clearLoadedGroupSizes = useCallback(() => {
+    if (!moodleGroupsLoadedRef.current) return;
+    moodleGroupsLoadedRef.current = false;
+    setConfig(p => ({ ...p, classCustomSizes: {} }));
+  }, []);
+
   // Wenn Modus wechselt oder Institut sich ändert, geladene Gruppen zurücksetzen
   useEffect(() => {
-    if (enrolMode !== 'update' && enrolMode !== 'both') { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); }
-  }, [enrolMode]);
+    if (enrolMode !== 'update' && enrolMode !== 'both') { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); clearLoadedGroupSizes(); }
+  }, [enrolMode, clearLoadedGroupSizes]);
   useEffect(() => {
-    setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({});
-  }, [config.institute]);
+    setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setLockedClassCourseMap({}); clearLoadedGroupSizes();
+  }, [config.institute, clearLoadedGroupSizes]);
 
   const unusualWarnings = useMemo(() => {
     const w = [];
@@ -828,6 +840,10 @@ const App = () => {
     const effectiveId = row.id + classGroupOffsetRef.current;
     return `Klasse-${String(effectiveId).padStart(2, '0')}`;
   }, [config.classNames, config.institute, orderImport]);
+
+  // Klassen-Nummer (cNum) einer Zeile: bestehende Moodle-Gruppen ohne Offset — so landen geladene
+  // Mitglieder und neu dazukommende Schüler derselben Gruppe im selben Export-Blatt
+  const classNumOf = useCallback(row => String(row.isExisting ? row.id : row.id + classGroupOffsetRef.current).padStart(2, '0'), []);
 
   // ─── Handler ──────────────────────────────────────────────────────────────
   const handleInput = useCallback(e => {
@@ -1057,9 +1073,10 @@ const App = () => {
 
       // --- Bestehende Klassen (aus Moodle-Gruppen) ---
       const existingRows = effectiveClassRows.filter(r => r.isExisting);
-      // Leere Gruppen mit Custom-Größe: neue Schüler generieren (wie neue Zeilen)
-      const emptyReuseRows = existingRows.filter(r => r.defaultSize === 0 && r.size > 0);
-      const nonEmptyExistingRows = existingRows.filter(r => !(r.defaultSize === 0 && r.size > 0));
+      // Bestehende Gruppen mit Custom-Größe: so viele neue Schüler generieren, wie dazukommen sollen
+      const extraStudentRows = existingRows.filter(r => r.newCount > 0);
+      // Mitglieder laden: alle Gruppen mit Mitgliedern (leere Gruppen ohne neue Schüler schaden nicht)
+      const nonEmptyExistingRows = existingRows.filter(r => r.defaultSize > 0 || !r.newCount);
       for (const r of nonEmptyExistingRows) {
         const matrixIds = new Set((classMatrix[r.id] || []).map(String));
         const allCourseIds = new Set([...(r.existingCourseIds || []).map(String), ...matrixIds]);
@@ -1081,7 +1098,7 @@ const App = () => {
             // Trainer: altes Namensmuster oder Rolle 4 (Bestelllisten-Lehrkräfte heißen wie ihre E-Mail)
             const isTrainer = member.username.includes(`${instClean}-trainer-`) || (member.roles || []).some(r => r.roleid === 4);
             data.push({
-              cNum: isTrainer ? 'ALL' : String(r.id).padStart(2, '0'),
+              cNum: isTrainer ? 'ALL' : classNumOf(r),
               cLabel: isTrainer ? undefined : classLabel,
               isT: isTrainer,
               first: member.firstname || (isTrainer ? 'Trainer' : 'Schüler'),
@@ -1114,7 +1131,7 @@ const App = () => {
 
       // --- Neue Klassen (nur im 'both'-Modus) + leere wiederverwendete Gruppen ---
       const newRows = enrolMode === 'both' ? effectiveClassRows.filter(r => r.isNew) : [];
-      const rowsNeedingNewStudents = [...emptyReuseRows, ...newRows];
+      const rowsNeedingNewStudents = [...extraStudentRows, ...newRows];
       if (rowsNeedingNewStudents.length > 0 || (enrolMode === 'both' && config.trainerCount > 0)) {
         let studentOffset = 0, trainerOffset = 0;
         classGroupOffsetRef.current = moodleGroups.length;
@@ -1149,7 +1166,7 @@ const App = () => {
         let sIdx = studentOffset + 1;
         for (const r of rowsNeedingNewStudents) {
           const selIds = (classMatrix[r.id] || []).map(String);
-          // Leere Wiederverwend.-Gruppen: bestehendem Gruppen-Namen direkt verwenden (moodle.js findet Gruppe via Name)
+          // Bestehende Gruppen: Gruppen-Namen direkt verwenden (moodle.js findet Gruppe via Name)
           const classLabel = r.isExisting
             ? r.groupName
             : `${config.institute}-${getClassLabel(r)}`;
@@ -1164,9 +1181,11 @@ const App = () => {
                 }).filter(Boolean);
               })()
             : courseDictionary.filter(cd => selIds.includes(String(cd.id)) && activeIds.includes(String(cd.id)));
-          for (let i = 0; i < r.size; i++) {
+          // Bestehende Gruppe: nur die neuen Schüler; gleiche Klassen-Nummer wie die geladenen Mitglieder
+          const count = r.isExisting ? r.newCount : r.size;
+          for (let i = 0; i < count; i++) {
             const id = String(sIdx++).padStart(3, '0');
-            data.push({ cNum: String(r.id + classGroupOffsetRef.current).padStart(2, '0'), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
+            data.push({ cNum: classNumOf(r), cLabel: classLabel, isT: false, first: 'Schüler', last: config.institute, user: `${instClean}-student-${id}`, mail: `student${id}@${instClean}.com`, pw: config.autoPassword ? generatePassword() : config.studentPwd, courses: selCourses });
           }
         }
       }
@@ -1302,7 +1321,7 @@ const App = () => {
     const classIds = [...new Set(data.filter(d => !d.isT).map(d => d.cNum))].sort();
     const classes = classIds.map(id => {
       const students = data.filter(d => !d.isT && d.cNum === id);
-      const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
+      const row = classRows.find(r => classNumOf(r) === id);
       return { label: row ? getClassLabel(row) : `Klasse-${id}`, accounts: students.map(toAccount) };
     });
     const buffer = await buildAccessWorkbook({
@@ -1527,7 +1546,7 @@ const App = () => {
         if (!firstDataPage) doc.addPage(); else firstDataPage = false;
         const students = data.filter(d => d.cNum === id);
         const classCourses = getUniqueCourses(students);
-        const row = classRows.find(r => String(r.id + classGroupOffsetRef.current).padStart(2, '0') === id);
+        const row = classRows.find(r => classNumOf(r) === id);
         const classLabel = row ? getClassLabel(row) : `Klasse-${id}`;
         renderHeader(classLabel, `ANZAHL: ${students.length}`);
 
@@ -1683,6 +1702,9 @@ const App = () => {
       }
 
       setMoodleGroups(groups);
+      // Frisch geladene Gruppen: keine alten Zusatz-Schüler übernehmen (Zeilen-IDs haben sich ggf. verschoben)
+      setConfig(p => ({ ...p, classCustomSizes: {} }));
+      moodleGroupsLoadedRef.current = true;
       setSelectedMoodleGroupIds(new Set()); // standardmäßig keine Klasse ausgewählt
       setClassMatrix(newMatrix);
       setLockedClassCourseMap(newLocked);
@@ -1980,8 +2002,9 @@ const App = () => {
                 {[
                   ['01', C.accent1, 'Institut wählen & Klassen laden',  'Institutsname eingeben, dann "Klassen laden" — die App fragt Moodle ab und listet alle vorhandenen Klassen des Instituts mit Mitgliederzahl.'],
                   ['02', C.accent1, 'Klassen auswählen',                'Checkboxen aktivieren welche Klassen aktualisiert werden sollen. Abgewählte Klassen erscheinen nicht in der Matrix.'],
-                  ['03', C.accent1, 'Matrix prüfen',                    'Bereits eingeschriebene Kurse sind blau mit RefreshCw-Symbol vorbelegt und können nicht abgewählt werden. Weitere Kurse können ergänzt werden.'],
-                  ['04', C.accent1, 'Generieren & Einschreiben',        '⌘G — lädt die echten Moodle-Mitglieder und schreibt sie erneut ein (Zeitraum & Kurse werden aktualisiert, Passwörter bleiben).'],
+                  ['03', C.accent1, 'Schüler dazufügen (optional)',     'In der Matrix beim Stift neben der Platzzahl eintragen, wie viele neue Schüler in diese Klasse kommen (z. B. 2). Sie werden fortlaufend nummeriert und in dieselbe Klasse eingeschrieben — bestehende Konten bleiben unverändert.'],
+                  ['04', C.accent1, 'Matrix prüfen',                    'Bereits eingeschriebene Kurse sind blau mit RefreshCw-Symbol vorbelegt und können nicht abgewählt werden. Weitere Kurse können ergänzt werden.'],
+                  ['05', C.accent1, 'Generieren & Einschreiben',        '⌘G — lädt die echten Moodle-Mitglieder und schreibt sie erneut ein (Zeitraum & Kurse werden aktualisiert, Passwörter bleiben).'],
                 ].map(([n, col, title, desc]) => (
                   <div key={n} className="flex gap-3 items-start">
                     <span style={{ color: col, backgroundColor: col + '18', borderColor: col + '30' }} className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 font-bold text-[10px] border mt-0.5">{n}</span>
@@ -3585,13 +3608,13 @@ const App = () => {
                       </div>
                     </div>
                     {enrolMode === 'update' && (
-                      <p style={{ color: C.accent1 }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aus Moodle laden, auswählen und Zeitraum & Kurse aktualisieren. Passwörter bleiben unverändert.</p>
+                      <p style={{ color: C.accent1 }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aus Moodle laden, auswählen und Zeitraum & Kurse aktualisieren. Passwörter bleiben unverändert. Über den Stift bei einer Klasse kommen neue Schüler dazu.</p>
                     )}
                     {enrolMode === 'new' && (
                       <p style={{ color: C.accent2 }} className="text-[8px] mt-1 ml-1 leading-snug">Schüler/Trainer/Klassen werden fortlaufend nach bestehenden Einträgen nummeriert.</p>
                     )}
                     {enrolMode === 'both' && (
-                      <p style={{ color: C.main }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aktualisieren + neue Klassen hinzufügen — in einem Durchlauf.</p>
+                      <p style={{ color: C.main }} className="text-[8px] mt-1 ml-1 leading-snug">Bestehende Klassen aktualisieren + neue Klassen hinzufügen — in einem Durchlauf. Über den Stift bei einer bestehenden Klasse kommen neue Schüler dazu.</p>
                     )}
                   </div>
                   {/* Bestellliste vom Marktplatz */}
@@ -3649,7 +3672,7 @@ const App = () => {
                             <button onClick={() => setActiveModal('classPool')} style={{ backgroundColor: C.accent1 + '15', color: C.accent1, borderColor: C.accent1 + '40' }} className="text-[9px] hover:brightness-110 flex items-center gap-1 font-semibold px-2 py-1 rounded-lg border transition-all">
                               <GraduationCap size={10} /> Klassenübersicht
                             </button>
-                            <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1 px-1.5 py-1">
+                            <button onClick={() => { setMoodleGroups([]); setSelectedMoodleGroupIds(new Set()); setClassMatrix({}); setLockedClassCourseMap({}); clearLoadedGroupSizes(); }} style={{ color: C.muted }} className="text-[9px] hover:opacity-70 flex items-center gap-1 px-1.5 py-1">
                               <X size={10} />
                             </button>
                           </div>
@@ -3940,16 +3963,16 @@ const App = () => {
                               />
                             ) : (
                               <div className="flex items-center gap-0.5">
-                                <span style={{ color: isInvalid ? '#BE123C' : (c.isExisting && c.defaultSize === 0 ? '#92400e' : C.muted), backgroundColor: isInvalid ? '#FEE2E2' : (c.isExisting && c.defaultSize === 0 ? '#fef3c7' : C.card), borderColor: isInvalid ? '#FECDD3' : (c.isExisting && c.defaultSize === 0 ? '#fcd34d' : C.border) }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.isExisting && c.defaultSize === 0 && c.size === 0 ? 'Leer' : `${c.size} Pl.`}</span>
-                                {(!c.isExisting || c.defaultSize === 0) && <button
-                                  onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.size)); }}
-                                  title={c.isExisting ? 'Neue Schüler in leere Gruppe einschreiben' : 'Schülerzahl bearbeiten'}
+                                <span style={{ color: isInvalid ? '#BE123C' : (c.isExisting && c.defaultSize === 0 ? '#92400e' : C.muted), backgroundColor: isInvalid ? '#FEE2E2' : (c.isExisting && c.defaultSize === 0 ? '#fef3c7' : C.card), borderColor: isInvalid ? '#FECDD3' : (c.isExisting && c.defaultSize === 0 ? '#fcd34d' : C.border) }} className="text-[9px] font-semibold uppercase tracking-tighter border px-1.5 py-0.5 rounded shadow-sm">{c.isExisting && c.defaultSize === 0 && c.size === 0 ? 'Leer' : c.isExisting && c.defaultSize > 0 && c.newCount > 0 ? `${c.defaultSize} + ${c.newCount} Pl.` : `${c.size} Pl.`}</span>
+                                <button
+                                  onClick={() => { setEditingClassSizeId(c.id); setEditingClassSizeVal(String(c.isExisting ? (c.newCount || 0) : c.size)); }}
+                                  title={!c.isExisting ? 'Schülerzahl bearbeiten' : c.defaultSize === 0 ? 'Neue Schüler in leere Gruppe einschreiben' : 'Neue Schüler zu dieser Klasse hinzufügen (Anzahl zusätzlich zu den bestehenden)'}
                                   style={{ color: config.classCustomSizes?.[c.id] != null ? '#3b82f6' : C.muted }}
                                   className="p-0.5 hover:opacity-70 transition-opacity"
                                 >
                                   <Edit3 size={9} />
-                                </button>}
-                                {(!c.isExisting || c.defaultSize === 0) && config.classCustomSizes?.[c.id] != null && (
+                                </button>
+                                {config.classCustomSizes?.[c.id] != null && (
                                   <button
                                     onClick={() => setConfig(p => { const s = { ...p.classCustomSizes }; delete s[c.id]; return { ...p, classCustomSizes: s }; })}
                                     title="Custom-Größe zurücksetzen"
